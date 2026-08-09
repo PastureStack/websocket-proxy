@@ -1,15 +1,18 @@
 package proxy
 
 import (
-	"io/ioutil"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 )
+
+const maxMasterAddressBytes = 4096
 
 type Switcher struct {
 	sync.Mutex
@@ -60,12 +63,23 @@ func (s *Switcher) start() {
 }
 
 func (s *Switcher) readConfig() error {
-	bytes, err := ioutil.ReadFile(s.config.MasterFile)
+	file, err := os.Open(s.config.MasterFile)
 	if os.IsNotExist(err) {
 		s.clear()
 		return nil
 	} else if err != nil {
 		return err
+	}
+	bytes, readErr := io.ReadAll(io.LimitReader(file, maxMasterAddressBytes+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if len(bytes) > maxMasterAddressBytes {
+		return fmt.Errorf("master address file exceeds %d bytes", maxMasterAddressBytes)
 	}
 
 	newAddr := strings.TrimSpace(string(bytes))
@@ -78,24 +92,27 @@ func (s *Switcher) readConfig() error {
 	if s.addr == newAddr {
 		return nil
 	}
+	remote, err := newWSProxy(&Config{PlatformAddr: newAddr})
+	if err != nil {
+		return fmt.Errorf("invalid master address: %w", err)
+	}
 
 	s.Lock()
 	logrus.Infof("Master address: %s", newAddr)
 	s.addr = newAddr
-	s.remote = newWSProxy(&Config{
-		CattleAddr: newAddr,
-	})
+	s.remote = remote
 	s.Unlock()
 
 	return nil
 }
 
 func (s *Switcher) clear() {
-	if s.remote == nil {
+	s.Lock()
+	defer s.Unlock()
+	if s.remote == nil && s.addr == "" {
 		return
 	}
-	s.Lock()
 	logrus.Infof("Master address: none, using local")
 	s.remote = nil
-	s.Unlock()
+	s.addr = ""
 }

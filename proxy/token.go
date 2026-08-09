@@ -8,37 +8,64 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/gorilla/mux"
 	"github.com/patrickmn/go-cache"
+	"github.com/sirupsen/logrus"
 )
 
 const (
-	authHeader     = "Authorization"
-	projectHeader  = "X-API-Project-Id"
-	defaultService = "swarm:2375"
+	authHeader                   = "Authorization"
+	projectHeader                = "X-API-Project-Id"
+	defaultService               = "swarm:2375"
+	maxServiceProxyResponseBytes = 1 << 20
+	serviceProxyRequestTimeout   = 15 * time.Second
 )
 
 type TokenLookup struct {
-	cache            *cache.Cache
-	client           http.Client
-	cattleAccessKey  string
-	cattleServiceKey string
-	serviceProxyURL  string
+	cache              *cache.Cache
+	client             http.Client
+	platformAccessKey  string
+	platformServiceKey string
+	serviceProxyURL    string
 }
 
-func NewTokenLookup(cattleAddr string) *TokenLookup {
+func NewTokenLookup(platformAddr string) *TokenLookup {
+	lookup, err := newTokenLookup(platformAddr)
+	if err == nil {
+		return lookup
+	}
+	lookup = &TokenLookup{
+		cache: cache.New(30*time.Second, 30*time.Second),
+	}
+	lookup.client.Timeout = serviceProxyRequestTimeout
+	lookup.client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return lookup
+}
+
+func newTokenLookup(platformAddr string) (*TokenLookup, error) {
+	baseURL, err := controlPlatformBaseURL(platformAddr)
+	if err != nil {
+		return nil, err
+	}
+	serviceProxyURL := baseURL.ResolveReference(&url.URL{Path: "/v1/serviceproxies"})
 	t := &TokenLookup{
 		cache:           cache.New(30*time.Second, 30*time.Second),
-		serviceProxyURL: fmt.Sprintf("http://%s/v1/serviceproxies", cattleAddr),
+		serviceProxyURL: serviceProxyURL.String(),
 	}
-	t.client.Timeout = 60 * time.Second
-	return t
+	t.client.Timeout = serviceProxyRequestTimeout
+	t.client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return t, nil
 }
 
 func (t *TokenLookup) Lookup(r *http.Request) (string, error) {
@@ -47,7 +74,7 @@ func (t *TokenLookup) Lookup(r *http.Request) (string, error) {
 		return token, nil
 	}
 
-	token, err := t.callRancher(r)
+	token, err := t.callPlatform(r)
 	if err != nil {
 		return "", err
 	}
@@ -68,7 +95,7 @@ func (t *TokenLookup) getFromCache(r *http.Request) (string, string) {
 	return key, ""
 }
 
-func (t *TokenLookup) callRancher(r *http.Request) (string, error) {
+func (t *TokenLookup) callPlatform(r *http.Request) (string, error) {
 	vars := mux.Vars(r)
 	service, ok := vars["service"]
 	if !ok {
@@ -76,6 +103,9 @@ func (t *TokenLookup) callRancher(r *http.Request) (string, error) {
 	}
 
 	parts := strings.SplitN(service, ":", 2)
+	if parts[0] == "" {
+		return "", fmt.Errorf("service name is empty")
+	}
 	port := 80
 	scheme := "http"
 	if len(parts) == 2 {
@@ -84,8 +114,11 @@ func (t *TokenLookup) callRancher(r *http.Request) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if port < 1 || port > 65535 {
+			return "", fmt.Errorf("service port is outside the valid range")
+		}
 
-		if strings.HasSuffix(parts[1], "443") {
+		if port == 443 {
 			scheme = "https"
 		}
 	}
@@ -95,9 +128,12 @@ func (t *TokenLookup) callRancher(r *http.Request) (string, error) {
 		Port:    port,
 		Scheme:  scheme,
 	})
+	if err != nil {
+		return "", err
+	}
 
-	logrus.Debugf("Calling rancher to get token: %s", t.serviceProxyURL)
-	newReq, err := http.NewRequest("POST", t.serviceProxyURL, bytes.NewReader(body))
+	logrus.Debug("Calling the control platform for a service proxy token")
+	newReq, err := http.NewRequest(http.MethodPost, t.serviceProxyURL, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -106,7 +142,7 @@ func (t *TokenLookup) callRancher(r *http.Request) (string, error) {
 
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		// Delegate auth based on TLS
-		newReq.SetBasicAuth(t.cattleAccessKey, t.cattleServiceKey)
+		newReq.SetBasicAuth(t.platformAccessKey, t.platformServiceKey)
 		newReq.Header.Set("X-API-Client-Access-Key", r.TLS.PeerCertificates[0].Subject.CommonName)
 	} else {
 		// Other forms of auth
@@ -135,9 +171,19 @@ func (t *TokenLookup) callRancher(r *http.Request) (string, error) {
 		return "", fmt.Errorf("HTTP error: %s, %d", resp.Status, resp.StatusCode)
 	}
 
-	respBody := ServiceProxyResponse{}
-	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxServiceProxyResponseBytes+1))
+	if err != nil {
 		return "", err
+	}
+	if len(responseBody) > maxServiceProxyResponseBytes {
+		return "", fmt.Errorf("service proxy response exceeds %d bytes", maxServiceProxyResponseBytes)
+	}
+	respBody := ServiceProxyResponse{}
+	if err := json.Unmarshal(responseBody, &respBody); err != nil {
+		return "", err
+	}
+	if respBody.Token == "" || len(respBody.Token) > maxJWTBytes {
+		return "", fmt.Errorf("service proxy response contained an invalid token")
 	}
 
 	return respBody.Token, nil

@@ -2,11 +2,12 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
-	"github.com/Sirupsen/logrus"
-	"github.com/rancher/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/sirupsen/logrus"
 )
 
 type BackendHTTPReader struct {
@@ -81,13 +82,16 @@ func (b *BackendHTTPReader) Read(out []byte) (int, error) {
 			logrus.Debugf("BACKEND READ RESPONSE EOF: %s %s", b.hostKey, b.msgKey)
 			return 0, io.EOF
 		}
+		if response.Code != 0 && (response.Code < 100 || response.Code > 999) {
+			return 0, fmt.Errorf("invalid backend HTTP status code")
+		}
 
 		b.buffer = []byte(response.Body)
 
 		for k, v := range response.Headers {
-			logrus.Debugf("BACKEND READ HEADER %s %s %s %v", b.hostKey, b.msgKey, k, v)
 			b.rw.Header()[k] = v
 		}
+		logrus.WithFields(logrus.Fields{"hostKey": b.hostKey, "messageKey": b.msgKey, "headerCount": len(response.Headers)}).Debug("Backend response headers received")
 
 		if response.Code > 0 && b.rw != nil {
 			logrus.Debugf("BACKEND READ STATUS CODE: %s %s %d", b.hostKey, b.msgKey, response.Code)
@@ -98,6 +102,6 @@ func (b *BackendHTTPReader) Read(out []byte) (int, error) {
 
 	c := copy(out, b.buffer)
 	b.buffer = b.buffer[c:]
-	logrus.Debugf("BACKEND READ %s: %s buffer: %s", b.msgKey, out[:c], b.buffer)
+	logrus.WithFields(logrus.Fields{"messageKey": b.msgKey, "bytes": c, "bufferedBytes": len(b.buffer)}).Debug("Backend response chunk read")
 	return c, nil
 }

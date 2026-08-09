@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/PastureStack/websocket-proxy/common"
 	"github.com/gorilla/websocket"
-	"github.com/pborman/uuid"
-	"github.com/rancher/websocket-proxy/common"
+	"github.com/sirupsen/logrus"
 )
 
 type backendProxy interface {
@@ -15,6 +14,7 @@ type backendProxy interface {
 	connect(backendKey, msgKey, url string) error
 	send(backendKey, msgKey, msg string) error
 	closeConnection(backendKey, msgKey string) error
+	releaseConnection(backendKey, msgKey string) error
 	hasBackend(backendKey string) bool
 }
 
@@ -31,46 +31,52 @@ type backendProxyManager struct {
 
 func (b *backendProxyManager) initializeClient(backendKey string) (string, <-chan common.Message, error) {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
 	multiplexer, ok := b.multiplexers[backendKey]
+	b.mu.RUnlock()
 	if !ok {
 		return "", nil, fmt.Errorf("No backend for key [%v]", backendKey)
 	}
-	msgKey, msgChan := multiplexer.initializeClient()
-	return msgKey, msgChan, nil
+	return multiplexer.initializeClient()
 }
 
 func (b *backendProxyManager) connect(backendKey, msgKey, url string) error {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
 	multiplexer, ok := b.multiplexers[backendKey]
+	b.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("No backend for key [%v]", backendKey)
 	}
-	multiplexer.connect(msgKey, url)
-	return nil
+	return multiplexer.connect(msgKey, url)
 }
 
 func (b *backendProxyManager) send(backendKey, msgKey, msg string) error {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
 	multiplexer, ok := b.multiplexers[backendKey]
+	b.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("No backend for key [%v]", backendKey)
 	}
-	multiplexer.send(msgKey, msg)
-	return nil
+	return multiplexer.send(msgKey, msg)
 }
 
 func (b *backendProxyManager) closeConnection(backendKey, msgKey string) error {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
 	multiplexer, ok := b.multiplexers[backendKey]
+	b.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("No backend for key [%v]", backendKey)
 	}
-	multiplexer.closeConnection(msgKey, true)
-	return nil
+	return multiplexer.closeConnection(msgKey, true)
+}
+
+func (b *backendProxyManager) releaseConnection(backendKey, msgKey string) error {
+	b.mu.RLock()
+	multiplexer, ok := b.multiplexers[backendKey]
+	b.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("No backend for key [%v]", backendKey)
+	}
+	return multiplexer.closeConnection(msgKey, false)
 }
 
 func (b *backendProxyManager) hasBackend(backendKey string) bool {
@@ -81,7 +87,7 @@ func (b *backendProxyManager) hasBackend(backendKey string) bool {
 }
 
 func (b *backendProxyManager) addBackend(backendKey string, ws *websocket.Conn) {
-	sessionID := uuid.New()
+	sessionID := common.NewRandomUUID()
 	logrus.Infof("Registering backend for host %v with session ID %v.", backendKey, sessionID)
 
 	msgs := make(chan string, 10)
@@ -93,12 +99,19 @@ func (b *backendProxyManager) addBackend(backendKey string, ws *websocket.Conn) 
 		frontendChans:     clients,
 		proxyManager:      b,
 		frontendMu:        &sync.RWMutex{},
+		connection:        ws,
+		done:              make(chan struct{}),
 	}
-	m.routeMessages(ws)
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	previous := b.multiplexers[backendKey]
 	b.multiplexers[backendKey] = m
+	b.mu.Unlock()
+
+	m.routeMessages(ws)
+	if previous != nil {
+		previous.shutdown()
+	}
 }
 
 func (b *backendProxyManager) removeBackend(backendKey, sessionID string) {

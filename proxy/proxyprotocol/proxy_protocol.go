@@ -3,7 +3,7 @@
 //
 // The MIT License (MIT)
 //
-// Copyright (c) 2014 Armon Dadgar
+// # Copyright (c) 2014 Armon Dadgar
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -42,12 +42,15 @@ var (
 	prefixLen = len(prefix)
 )
 
+const maxProxyHeaderBytes = 108
+
 // Listener is used to wrap an underlying listener,
 // whose connections may be using the HAProxy Proxy Protocol (version 1).
-// If the connection is using the protocol, the RemoteAddr() will return
-// the correct client address.
+// Parsed client identity is made available to the HTTP forwarding-header
+// integration without changing the underlying socket address.
 type Listener struct {
-	Listener net.Listener
+	Listener          net.Listener
+	TrustedProxyCIDRs []*net.IPNet
 }
 
 // Conn is used to wrap an underlying connection which
@@ -56,6 +59,7 @@ type Listener struct {
 type Conn struct {
 	bufReader *bufio.Reader
 	conn      net.Conn
+	allow     bool
 	once      sync.Once
 }
 
@@ -72,7 +76,7 @@ func (p *Listener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewConn(conn), nil
+	return newConn(conn, trustedProxySource(conn.RemoteAddr(), p.TrustedProxyCIDRs)), nil
 }
 
 // Close closes the underlying listener.
@@ -88,9 +92,14 @@ func (p *Listener) Addr() net.Addr {
 // NewConn is used to wrap a net.Conn that may be speaking
 // the proxy protocol into a proxyproto.Conn
 func NewConn(conn net.Conn) *Conn {
+	return newConn(conn, true)
+}
+
+func newConn(conn net.Conn, allow bool) *Conn {
 	pConn := &Conn{
-		bufReader: bufio.NewReader(conn),
+		bufReader: bufio.NewReaderSize(conn, maxProxyHeaderBytes),
 		conn:      conn,
+		allow:     allow,
 	}
 	return pConn
 }
@@ -136,6 +145,9 @@ func (p *Conn) SetWriteDeadline(t time.Time) error {
 }
 
 func (p *Conn) checkPrefix() error {
+	if !p.allow {
+		return nil
+	}
 	// Incrementally check each byte of the prefix
 	for i := 1; i <= prefixLen; i++ {
 		inp, err := p.bufReader.Peek(i)
@@ -150,25 +162,29 @@ func (p *Conn) checkPrefix() error {
 	}
 
 	// Read the header line
-	header, err := p.bufReader.ReadString('\n')
+	headerBytes, err := p.bufReader.ReadSlice('\n')
 	if err != nil {
 		p.conn.Close()
-		return err
+		return fmt.Errorf("invalid or oversized proxy protocol header")
 	}
-	// Strip the carriage return and new line
-	header = header[:len(header)-2]
+	if len(headerBytes) > maxProxyHeaderBytes || !bytes.HasSuffix(headerBytes, []byte("\r\n")) {
+		p.conn.Close()
+		return fmt.Errorf("invalid or oversized proxy protocol header")
+	}
+	// Strip the carriage return and new line.
+	header := string(headerBytes[:len(headerBytes)-2])
 
 	// Split on spaces, should be (PROXY <type> <src addr> <dst addr> <src port> <dst port>)
 	parts := strings.Split(header, " ")
 	if len(parts) != 6 {
 		p.conn.Close()
-		return fmt.Errorf("Invalid header line: %s", header)
+		return fmt.Errorf("invalid proxy protocol header")
 	}
 
 	// Verify the type is known
 	if parts[1] != "TCP4" && parts[1] != "TCP6" {
 		p.conn.Close()
-		return fmt.Errorf("Unhandled address type: %s", parts[1])
+		return fmt.Errorf("unsupported proxy protocol address type")
 	}
 
 	// Parse out the source address
@@ -184,6 +200,11 @@ func (p *Conn) checkPrefix() error {
 		p.conn.Close()
 		return err
 	}
+	if (parts[1] == "TCP4" && (srcAddr.IP.To4() == nil || destAddr.IP.To4() == nil)) ||
+		(parts[1] == "TCP6" && (srcAddr.IP.To4() != nil || destAddr.IP.To4() != nil)) {
+		p.conn.Close()
+		return fmt.Errorf("proxy protocol address family mismatch")
+	}
 
 	proxyInfo := &ProxyProtoInfo{
 		Protocol:   parts[1],
@@ -195,13 +216,37 @@ func (p *Conn) checkPrefix() error {
 	return nil
 }
 
+func trustedProxySource(address net.Addr, trusted []*net.IPNet) bool {
+	var ip net.IP
+	if tcpAddress, ok := address.(*net.TCPAddr); ok {
+		ip = tcpAddress.IP
+	} else if address != nil {
+		host, _, err := net.SplitHostPort(address.String())
+		if err == nil {
+			ip = net.ParseIP(host)
+		}
+	}
+	if ip == nil {
+		return false
+	}
+	if len(trusted) == 0 {
+		return ip.IsLoopback()
+	}
+	for _, network := range trusted {
+		if network != nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseAddr(ipStr, portStr string) (*net.TCPAddr, error) {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return nil, fmt.Errorf("Invalid ip: %s", ipStr)
 	}
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
+	if err != nil || port < 1 || port > 65535 {
 		return nil, fmt.Errorf("Invalid port: %s", portStr)
 	}
 	return &net.TCPAddr{IP: ip, Port: port}, nil

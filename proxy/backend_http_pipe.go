@@ -3,7 +3,7 @@ package proxy
 import (
 	"net/http"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 )
 
 func NewHTTPPipe(rw http.ResponseWriter, backend backendProxy, hostKey string) (*BackendHTTPReader, *BackendHTTPWriter, error) {

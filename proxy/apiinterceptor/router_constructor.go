@@ -3,7 +3,7 @@ package apiinterceptor
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -11,72 +11,73 @@ import (
 	"strings"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/filters"
+	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/filters/auth"
+	httpfilter "github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/filters/http"
+	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/model"
 	"github.com/gorilla/mux"
-	"github.com/pkg/errors"
-	"github.com/rancher/websocket-proxy/proxy/apiinterceptor/filters"
-	"github.com/rancher/websocket-proxy/proxy/apiinterceptor/filters/auth"
-	httpfilter "github.com/rancher/websocket-proxy/proxy/apiinterceptor/filters/http"
-	"github.com/rancher/websocket-proxy/proxy/apiinterceptor/model"
+	log "github.com/sirupsen/logrus"
 )
 
-//destination defines the properties of a destination
+const maxAPIInterceptorConfigBytes = 4 << 20
+
+// destination defines the properties of a destination
 type destination struct {
 	DestinationURL string   `json:"DestinationURL"`
 	Paths          []string `json:"Paths"`
 }
 
-//configFileFields stores filter config
+// configFileFields stores filter config
 type configFileFields struct {
 	RequestInterceptors []model.FilterData
 	Destinations        []destination
 }
 
-func newRouter(configFile string, cattleAddr string, routerSetter routerSetter) (http.Handler, error) {
-	if cattleAddr == "" {
-		return nil, fmt.Errorf("No CattleAddr set in proxy config to forward the requests to Cattle")
+func newRouter(configFile string, platformAddr string, routerSetter routerSetter) (http.Handler, error) {
+	if platformAddr == "" {
+		return nil, fmt.Errorf("no PlatformAddr is set for forwarding control-platform API requests")
 	}
 
-	cattleURL := "http://" + cattleAddr
-	url, err := url.Parse(cattleURL)
-	if err != nil {
-		return nil, errors.Wrapf(err, "Couldn't parse cattle url %v", url)
+	platformURL, err := url.Parse("http://" + platformAddr)
+	if err != nil || platformURL.Host == "" || platformURL.User != nil || platformURL.Path != "" ||
+		platformURL.RawQuery != "" || platformURL.Fragment != "" || platformURL.Opaque != "" {
+		return nil, fmt.Errorf("invalid control-platform address")
 	}
 
 	director := func(req *http.Request) {
-		req.URL.Scheme = "http"
-		req.URL.Host = cattleAddr
+		req.URL.Scheme = platformURL.Scheme
+		req.URL.Host = platformURL.Host
 	}
-	cattleRevProxy := &httputil.ReverseProxy{
+	platformRevProxy := &httputil.ReverseProxy{
 		Director:      director,
 		FlushInterval: time.Millisecond * 100,
 	}
 
 	apiFilters, err := loadAPIFilters()
 	if err != nil {
-		return nil, errors.Wrap(err, "Couldn't load API filters")
+		return nil, fmt.Errorf("couldn't load API filters: %w", err)
 	}
-	return buildRouter(configFile, cattleRevProxy, apiFilters, routerSetter)
+	return buildRouter(configFile, platformRevProxy, apiFilters, routerSetter)
 }
 
-func buildRouter(configFile string, cattleRevProxy *httputil.ReverseProxy, apiFilters map[string]filters.APIFilter, routerSetter routerSetter) (http.Handler, error) {
+func buildRouter(configFile string, platformRevProxy *httputil.ReverseProxy, apiFilters map[string]filters.APIFilter, routerSetter routerSetter) (http.Handler, error) {
 	pathPreFilters := map[string][]model.FilterData{}
 	pathDestinations := map[string]http.Handler{}
 	configFields := configFileFields{}
 
 	if configFile != "" {
 		if _, err := os.Stat(configFile); os.IsNotExist(err) {
-			//file does not exist, treating it as empty config, since cattle deletes the file when config is set to empty
+			// Treat a missing file as empty configuration; the control plane removes it when no filters are configured.
 			log.Debugf("config.json file not found %v", configFile)
 		} else {
-			configContent, err := ioutil.ReadFile(configFile)
+			configContent, err := readBoundedConfigFile(configFile)
 			if err != nil {
-				return nil, errors.Wrapf(err, "Error reading config.json file at path %v", configFile)
+				return nil, fmt.Errorf("error reading API interceptor config at %q: %w", configFile, err)
 			}
 
 			err = json.Unmarshal(configContent, &configFields)
 			if err != nil {
-				return nil, errors.Wrap(err, "Couldn't unmarshal config.json")
+				return nil, fmt.Errorf("couldn't decode API interceptor config: %w", err)
 			}
 
 			for _, filter := range configFields.RequestInterceptors {
@@ -89,7 +90,7 @@ func buildRouter(configFile string, cattleRevProxy *httputil.ReverseProxy, apiFi
 				//build the pathDestinations map
 				destProxy, err := newProxy(destination.DestinationURL)
 				if err != nil {
-					return nil, errors.Wrapf(err, "Couldn't load proxy for destination %v", destination)
+					return nil, fmt.Errorf("couldn't load configured proxy destination: %w", err)
 				}
 				for _, path := range destination.Paths {
 					pathDestinations[path] = destProxy
@@ -104,12 +105,12 @@ func buildRouter(configFile string, cattleRevProxy *httputil.ReverseProxy, apiFi
 	}
 
 	interceptor := &interceptor{
-		configFile:         configFile,
-		cattleReverseProxy: cattleRevProxy,
-		apiFilters:         copyAPIFilters,
-		pathDestinations:   pathDestinations,
-		pathPreFilters:     pathPreFilters,
-		routerSetter:       routerSetter,
+		configFile:           configFile,
+		platformReverseProxy: platformRevProxy,
+		apiFilters:           copyAPIFilters,
+		pathDestinations:     pathDestinations,
+		pathPreFilters:       pathPreFilters,
+		routerSetter:         routerSetter,
 	}
 
 	router := mux.NewRouter().StrictSlash(false)
@@ -124,7 +125,7 @@ func buildRouter(configFile string, cattleRevProxy *httputil.ReverseProxy, apiFi
 	}
 
 	router.Methods("POST").Path("/v1-api-interceptor/reload").HandlerFunc(http.HandlerFunc(interceptor.reload))
-	router.NotFoundHandler = http.HandlerFunc(interceptor.cattleProxy)
+	router.NotFoundHandler = http.HandlerFunc(interceptor.platformProxy)
 	var routes []*mux.Route
 	router.Walk(func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
 		routes = append(routes, route)
@@ -134,18 +135,34 @@ func buildRouter(configFile string, cattleRevProxy *httputil.ReverseProxy, apiFi
 	return router, nil
 }
 
+func readBoundedConfigFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	contents, err := io.ReadAll(io.LimitReader(file, maxAPIInterceptorConfigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(contents) > maxAPIInterceptorConfigBytes {
+		return nil, fmt.Errorf("API interceptor configuration exceeds %d bytes", maxAPIInterceptorConfigBytes)
+	}
+	return contents, nil
+}
+
 func loadAPIFilters() (map[string]filters.APIFilter, error) {
 	apiFilters := make(map[string]filters.APIFilter)
 
 	httpFilter, err := httpfilter.NewFilter()
 	if err != nil {
-		return nil, errors.Wrapf(err, "Couldn't initalize APIFilter %v", httpFilter.GetType())
+		return nil, fmt.Errorf("couldn't initialize HTTP API filter: %w", err)
 	}
 	apiFilters[httpFilter.GetType()] = httpFilter
 
 	tokenFilter, err := auth.NewFilter()
 	if err != nil {
-		return nil, errors.Wrapf(err, "Couldn't initalize APIFilter %v", httpFilter.GetType())
+		return nil, fmt.Errorf("couldn't initialize authentication API filter: %w", err)
 	}
 	apiFilters[tokenFilter.GetType()] = tokenFilter
 
@@ -153,12 +170,14 @@ func loadAPIFilters() (map[string]filters.APIFilter, error) {
 }
 
 func newProxy(target string) (*httputil.ReverseProxy, error) {
-	url, err := url.Parse(target)
+	parsed, err := url.Parse(target)
 	if err != nil {
-		log.Errorf("Error reading destination URL %v", target)
-		return nil, err
+		return nil, fmt.Errorf("invalid destination URL")
 	}
-	newProxy := httputil.NewSingleHostReverseProxy(url)
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return nil, fmt.Errorf("destination URL must be HTTP(S), include a host, and contain no credentials or fragment")
+	}
+	newProxy := httputil.NewSingleHostReverseProxy(parsed)
 	newProxy.FlushInterval = time.Millisecond * 100
 	return newProxy, nil
 }

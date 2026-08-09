@@ -1,0 +1,14 @@
+# Ubuntu 26.04 package lock for reproducible PastureStack builds.
+# Refresh the snapshot and every exact direct-package version together.
+
+UBUNTU_APT_SNAPSHOT='20260808T000000Z'
+
+UBUNTU_APT_BASH_VERSION='5.3-2ubuntu1'
+UBUNTU_APT_CA_CERTIFICATES_VERSION='20260601~26.04.1'
+UBUNTU_APT_CURL_VERSION='8.18.0-1ubuntu2.3'
+UBUNTU_APT_GCC_VERSION='4:15.2.0-5ubuntu1'
+UBUNTU_APT_GIT_VERSION='1:2.53.0-1ubuntu1'
+UBUNTU_APT_GZIP_VERSION='1.14-1~exp2ubuntu1.1'
+UBUNTU_APT_LIBC6_DEV_VERSION='2.43-2ubuntu2.3'
+UBUNTU_APT_TAR_VERSION='1.35+dfsg-4ubuntu0.4'
+UBUNTU_APT_XZ_UTILS_VERSION='5.8.3-1'

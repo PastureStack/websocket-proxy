@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
-	jwt "github.com/dgrijalva/jwt-go"
+	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 
-	"github.com/rancher/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/common"
 )
 
 const wsProto string = "Sec-Websocket-Protocol"
@@ -36,7 +36,7 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		respHeaders.Add(wsProto, wsProtoBinary)
 	}
 	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
+		CheckOrigin: workspaceSameOrigin,
 	}
 	ws, err := upgrader.Upgrade(rw, req, respHeaders)
 	if err != nil {
@@ -45,6 +45,7 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer closeConnection(ws)
+	ws.SetReadLimit(common.MaxWireMessageBytes)
 
 	msgKey, respChannel, err := h.backend.initializeClient(hostKey)
 	if err != nil {
@@ -89,8 +90,8 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 	}()
 
-	url := req.URL.String()
-	if err = h.backend.connect(hostKey, msgKey, url); err != nil {
+	requestURL := req.URL.String()
+	if err = h.backend.connect(hostKey, msgKey, requestURL); err != nil {
 		return
 	}
 
@@ -120,21 +121,19 @@ func (h *FrontendHandler) auth(req *http.Request) (*jwt.Token, string, error) {
 		if tokenParam == "" {
 			return nil, "", noAuthError{err: err.Error()}
 		}
-		return nil, "", fmt.Errorf("Error parsing token: %v. Token parameter: %v", err, tokenParam)
+		return nil, "", fmt.Errorf("Error parsing token: %v. Token parameter: %v", err, redactSecretForLog(tokenParam))
 	}
 
 	if !token.Valid {
-		return nil, "", fmt.Errorf("Token not valid. Token parameter: %v", tokenParam)
+		return nil, "", fmt.Errorf("Token not valid. Token parameter: %v", redactSecretForLog(tokenParam))
 	}
 
-	hostUUID, found := token.Claims["hostUuid"]
-	if found {
-		if hostKey, ok := hostUUID.(string); ok && h.backend.hasBackend(hostKey) {
-			return token, hostKey, nil
-		}
+	hostUUID, found := stringClaim(token, "hostUuid")
+	if found && h.backend.hasBackend(hostUUID) {
+		return token, hostUUID, nil
 	}
 
-	return nil, "", fmt.Errorf("Invalid backend host requested: %v", hostUUID)
+	return nil, "", fmt.Errorf("invalid or unavailable backend host")
 }
 
 func closeConnection(ws *websocket.Conn) {
@@ -145,8 +144,9 @@ func closeConnection(ws *websocket.Conn) {
 func parseToken(req *http.Request, parsedPublicKey interface{}) (*jwt.Token, string, error) {
 	tokenString := ""
 	if authHeader := req.Header.Get("Authorization"); authHeader != "" {
-		if len(authHeader) > 6 && strings.EqualFold("bearer", authHeader[0:6]) {
-			tokenString = strings.Trim(authHeader[7:], " ")
+		parts := strings.Fields(authHeader)
+		if len(parts) == 2 && strings.EqualFold("bearer", parts[0]) {
+			tokenString = parts[1]
 		}
 	}
 
@@ -163,9 +163,7 @@ func parseToken(req *http.Request, parsedPublicKey interface{}) (*jwt.Token, str
 		return nil, "", fmt.Errorf("No JWT provided")
 	}
 
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		return parsedPublicKey, nil
-	})
+	token, err := parseSignedJWT(tokenString, parsedPublicKey)
 	return token, tokenString, err
 }
 

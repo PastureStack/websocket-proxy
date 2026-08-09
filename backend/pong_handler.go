@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/gorilla/websocket"
+	"github.com/sirupsen/logrus"
 )
 
 func newPongHandler(ws *websocket.Conn) *pongHandler {

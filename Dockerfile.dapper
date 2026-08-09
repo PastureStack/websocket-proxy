@@ -1,17 +1,95 @@
-FROM golang:1.9.3
-RUN go get github.com/rancher/trash
-RUN go get github.com/golang/lint/golint
-RUN curl -sL https://get.docker.com/builds/Linux/x86_64/docker-1.9.1 > /usr/bin/docker && \
-    chmod +x /usr/bin/docker
-RUN apt-get update && \
-    apt-get install -y xz-utils
-ENV PATH /go/bin:$PATH
-ENV DAPPER_SOURCE /go/src/github.com/rancher/websocket-proxy
-ENV DAPPER_OUTPUT bin dist
-ENV DAPPER_DOCKER_SOCKET true
-ENV DAPPER_ENV TAG REPO
-ENV GO15VENDOREXPERIMENT 1
-ENV TRASH_CACHE ${DAPPER_SOURCE}/.trash-cache
+FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
+
+COPY ubuntu-apt.lock /licenses/ubuntu-apt.lock
+ADD --checksum=sha256:6077d27c6b6f8b23590cb01ff877ed8c804a67a5442cc32b5a33da10d2bd0e90 https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260601~26.04.1_all.deb /tmp/ca-certificates.deb
+
+ARG DAPPER_HOST_ARCH=amd64
+ARG GO_VERSION=1.26.5
+ARG GO_SHA256_amd64=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
+ARG GO_SHA256_arm=6dae9edab81c13bccf962dec15f1fd2ec26c14a6821b4d2c92dab4130c289d7a
+ARG DOCKER_VERSION=29.6.2
+ARG DOCKER_SHA256_amd64=d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74
+ARG DOCKER_SHA256_arm=17a0d5461210d24ba1b7a2d724a7061c8feb1683b28c68f4aa1ccba5867cdae1
+
+ENV HOST_ARCH=${DAPPER_HOST_ARCH} \
+    ARCH=${DAPPER_HOST_ARCH} \
+    DEBIAN_FRONTEND=noninteractive \
+    GOPATH=/go \
+    GO111MODULE=off \
+    GO15VENDOREXPERIMENT=1 \
+    GOCACHE=/tmp/go-build-cache \
+    GOTELEMETRY=off \
+    XDG_CONFIG_HOME=/tmp/go-config \
+    PATH=/go/bin:/usr/local/go/bin:${PATH} \
+    SHELL=/bin/bash
+
+RUN set -eux; \
+    . /licenses/ubuntu-apt.lock; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; \
+    rm -rf /tmp/ca-bootstrap; \
+    mkdir -p /tmp/ca-bootstrap /etc/ssl/certs; \
+    dpkg-deb --extract /tmp/ca-certificates.deb /tmp/ca-bootstrap; \
+    find /tmp/ca-bootstrap/usr/share/ca-certificates -type f -name '*.crt' \
+        | LC_ALL=C sort \
+        | while IFS= read -r certificate; do sed -e '$a\' "${certificate}"; done \
+        > /etc/ssl/certs/ca-certificates.crt; \
+    test -s /etc/ssl/certs/ca-certificates.crt; \
+    printf 'Types: deb\nURIs: https://snapshot.ubuntu.com/ubuntu/%s\nSuites: resolute resolute-updates resolute-backports resolute-security\nComponents: main universe restricted multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\nSnapshot: no\n' \
+        "${UBUNTU_APT_SNAPSHOT}" > /etc/apt/sources.list.d/pasturestack-snapshot.sources; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\nAcquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\nAcquire::https::Verify-Peer "true";\nAcquire::https::Verify-Host "true";\nAcquire::AllowInsecureRepositories "false";\nAPT::Get::AllowUnauthenticated "false";\n' > /etc/apt/apt.conf.d/80pasturestack-retries; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        bash="${UBUNTU_APT_BASH_VERSION}" \
+        ca-certificates="${UBUNTU_APT_CA_CERTIFICATES_VERSION}" \
+        curl="${UBUNTU_APT_CURL_VERSION}" \
+        gcc="${UBUNTU_APT_GCC_VERSION}" \
+        git="${UBUNTU_APT_GIT_VERSION}" \
+        gzip="${UBUNTU_APT_GZIP_VERSION}" \
+        libc6-dev="${UBUNTU_APT_LIBC6_DEV_VERSION}" \
+        tar="${UBUNTU_APT_TAR_VERSION}" \
+        xz-utils="${UBUNTU_APT_XZ_UTILS_VERSION}"; \
+    { \
+        printf 'snapshot\t%s\n' "${UBUNTU_APT_SNAPSHOT}"; \
+        dpkg-query -W -f='${binary:Package}\t${Version}\n' | LC_ALL=C sort; \
+    } > /licenses/WEBSOCKET-PROXY-UBUNTU-APT-PACKAGES.tsv; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/bin/pebble; \
+    rm -f /bin/sh; \
+    ln -s /bin/bash /bin/sh
+
+RUN git config --system --add safe.directory '*'
+
+RUN case "${DAPPER_HOST_ARCH}" in \
+        amd64) go_arch=amd64; go_sha="${GO_SHA256_amd64}" ;; \
+        arm) go_arch=armv6l; go_sha="${GO_SHA256_arm}" ;; \
+        *) echo "unsupported DAPPER_HOST_ARCH=${DAPPER_HOST_ARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz"; \
+    echo "${go_sha}  /tmp/go.tgz" | sha256sum -c -; \
+    tar -C /usr/local -xzf /tmp/go.tgz; \
+    rm -f /tmp/go.tgz; \
+    mkdir -p /go/bin /go/src; \
+    go version
+
+RUN case "${DAPPER_HOST_ARCH}" in \
+        amd64) docker_arch=x86_64; docker_sha="${DOCKER_SHA256_amd64}" ;; \
+        arm) docker_arch=armhf; docker_sha="${DOCKER_SHA256_arm}" ;; \
+        *) echo "unsupported DAPPER_HOST_ARCH=${DAPPER_HOST_ARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/docker.tgz \
+        "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz"; \
+    echo "${docker_sha}  /tmp/docker.tgz" | sha256sum -c -; \
+    tar xzf /tmp/docker.tgz -C /usr/bin --strip-components=1 docker/docker; \
+    rm -f /tmp/docker.tgz; \
+    chmod +x /usr/bin/docker; \
+    docker --version
+
+
+ENV DAPPER_SOURCE=/go/src/github.com/PastureStack/websocket-proxy
+ENV DAPPER_OUTPUT="bin dist"
+ENV DAPPER_DOCKER_SOCKET=true
+ENV DAPPER_ENV="TAG REPO VERSION_OVERRIDE SOURCE_DATE_EPOCH"
 WORKDIR ${DAPPER_SOURCE}
+
 ENTRYPOINT ["./scripts/entry"]
 CMD ["ci"]

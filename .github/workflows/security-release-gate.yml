@@ -1,0 +1,151 @@
+name: Security release gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Test, reproduce, and scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VERSION_OVERRIDE: v0.23.13
+      SOURCE_DATE_EPOCH: "0"
+      TRIVY_IMAGE: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c
+      BUILDER_IMAGE: pasturestack-websocket-proxy-dapper:ubuntu26
+
+    steps:
+      - name: Check out the reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Prepare evidence directory
+        run: mkdir -p evidence
+
+      - name: Build, test with the race detector, validate, and package
+        id: build
+        run: |
+          set -o pipefail
+          make ci 2>&1 | tee evidence/build-test.log
+          cp bin/websocket-proxy evidence/websocket-proxy-linux-amd64
+          cp dist/artifacts/websocket-proxy-0.23.13-linux-amd64.tar.xz evidence/first-build.tar.xz
+
+      - name: Verify a byte-identical second package
+        id: reproduce
+        run: |
+          set -o pipefail
+          rm -rf bin dist
+          make package 2>&1 | tee evidence/reproducible-build.log
+          cp dist/artifacts/websocket-proxy-0.23.13-linux-amd64.tar.xz evidence/second-build.tar.xz
+          cmp evidence/first-build.tar.xz evidence/second-build.tar.xz
+          sha256sum evidence/first-build.tar.xz evidence/second-build.tar.xz \
+            | tee evidence/package-sha256.txt
+
+      - name: Scan reachable Go symbols
+        id: govulncheck
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          docker run --rm \
+            --entrypoint /bin/bash \
+            -v "$PWD/evidence:/evidence" \
+            "$BUILDER_IMAGE" \
+            -lc 'set -euo pipefail; GO111MODULE=on GOBIN=/tmp/security-bin go install golang.org/x/vuln/cmd/govulncheck@v1.6.0; /tmp/security-bin/govulncheck -mode=binary -scan=symbol /evidence/websocket-proxy-linux-amd64 2>&1 | tee /evidence/govulncheck.txt'
+
+      - name: Scan the source tree for exposed secrets
+        id: secret_scan
+        continue-on-error: true
+        run: |
+          # The skipped private key is a published test fixture, not a production credential.
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            -v "$PWD/evidence:/evidence" \
+            "$TRIVY_IMAGE" fs \
+            --scanners secret \
+            --skip-dirs /workspace/evidence \
+            --skip-files /workspace/testutils/private.pem \
+            --exit-code 1 \
+            --format json \
+            --output /evidence/source-secrets.json \
+            /workspace
+
+      - name: Scan source dependencies
+        id: source_scan
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            -v "$PWD/evidence:/evidence" \
+            "$TRIVY_IMAGE" fs \
+            --scanners vuln \
+            --skip-dirs /workspace/evidence \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --format json \
+            --output /evidence/source-vulnerabilities.json \
+            /workspace
+
+      - name: Generate a CycloneDX source SBOM
+        id: source_sbom
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            -v "$PWD/evidence:/evidence" \
+            "$TRIVY_IMAGE" fs \
+            --skip-dirs /workspace/evidence \
+            --format cyclonedx \
+            --output /evidence/source.cdx.json \
+            /workspace
+
+      - name: Scan the reproducible builder image
+        id: image_scan
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/evidence:/evidence" \
+            -v "$PWD/security/openvex.json:/security/openvex.json:ro" \
+            "$TRIVY_IMAGE" image \
+            --severity HIGH,CRITICAL \
+            --vex /security/openvex.json \
+            --show-suppressed \
+            --exit-code 1 \
+            --format json \
+            --output /evidence/builder-vulnerabilities.json \
+            "$BUILDER_IMAGE"
+
+      - name: Record gate outcomes
+        if: always()
+        run: |
+          {
+            printf 'build=%s\n' '${{ steps.build.outcome }}'
+            printf 'reproduce=%s\n' '${{ steps.reproduce.outcome }}'
+            printf 'govulncheck=%s\n' '${{ steps.govulncheck.outcome }}'
+            printf 'secret_scan=%s\n' '${{ steps.secret_scan.outcome }}'
+            printf 'source_scan=%s\n' '${{ steps.source_scan.outcome }}'
+            printf 'source_sbom=%s\n' '${{ steps.source_sbom.outcome }}'
+            printf 'image_scan=%s\n' '${{ steps.image_scan.outcome }}'
+          } > evidence/gate-outcomes.txt
+
+      - name: Upload review evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: websocket-proxy-security-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Enforce the release gate
+        if: always()
+        run: |
+          test '${{ steps.build.outcome }}' = success
+          test '${{ steps.reproduce.outcome }}' = success
+          test '${{ steps.govulncheck.outcome }}' = success
+          test '${{ steps.secret_scan.outcome }}' = success
+          test '${{ steps.source_scan.outcome }}' = success
+          test '${{ steps.source_sbom.outcome }}' = success
+          test '${{ steps.image_scan.outcome }}' = success

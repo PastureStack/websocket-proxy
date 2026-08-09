@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/model"
 	"github.com/gorilla/mux"
-	"github.com/rancher/websocket-proxy/proxy/apiinterceptor/model"
 	check "gopkg.in/check.v1"
 	"os"
 )
@@ -18,7 +18,7 @@ import (
 func Test(t *testing.T) { check.TestingT(t) }
 
 type InterceptorTestSuite struct {
-	mockCattle      *mockCattleServer
+	mockPlatform    *mockPlatformServer
 	mockInterceptor *mockInterceptor
 }
 
@@ -56,24 +56,24 @@ func (i *InterceptorTestSuite) SetUpSuite(c *check.C) {
 	}
 
 	ps := &Starter{
-		CattleProxyPaths: []string{"/{cattle-proxy:.*}"},
-		Config:           conf,
+		PlatformProxyPaths: []string{"/{platform-proxy:.*}"},
+		Config:             conf,
 	}
 	go ps.StartProxy()
 
-	// This mock will receive and store requests that would have gone to cattle
-	cattleRouter := mux.NewRouter()
-	mc := &mockCattleServer{c}
-	cattleRouter.Handle("/{cattle:.*}", mc)
-	go http.ListenAndServe("127.0.0.1:5551", cattleRouter)
+	// This mock receives and stores requests that would have gone to the control platform.
+	platformRouter := mux.NewRouter()
+	mc := &mockPlatformServer{c}
+	platformRouter.Handle("/{platform:.*}", mc)
+	go http.ListenAndServe("127.0.0.1:5551", platformRouter)
 
-	// This mock will receive and store requests that would have gone to cattle
+	// This mock receives and stores requests that would have gone to the control platform.
 	interceptorRouter := mux.NewRouter()
 	mi := &mockInterceptor{c: c}
 	interceptorRouter.Handle("/interceptor", mi)
 	go http.ListenAndServe("127.0.0.1:5552", interceptorRouter)
 
-	i.mockCattle = mc
+	i.mockPlatform = mc
 	i.mockInterceptor = mi
 
 	// Allow servers time to initialize
@@ -135,13 +135,13 @@ func (i *InterceptorTestSuite) TestInterceptor(c *check.C) {
 	if err != nil {
 		c.Fatal("Couldn't read response: ", err)
 	}
-	// Verify the response from cattle. Since the mock cattle server just echos the request it received,
+	// Verify the response from the control platform. The mock server echoes the request it receives,
 	// the response should match the modified response.
-	cattleRespBody := map[string]interface{}{}
-	if err = json.NewDecoder(resp.Body).Decode(&cattleRespBody); err != nil {
-		c.Fatal("Coudln't decode mock cattle response: ", err)
+	platformRespBody := map[string]interface{}{}
+	if err = json.NewDecoder(resp.Body).Decode(&platformRespBody); err != nil {
+		c.Fatal("Couldn't decode mock platform response: ", err)
 	}
-	c.Check(cattleRespBody, check.DeepEquals, respBody)
+	c.Check(platformRespBody, check.DeepEquals, respBody)
 	for k, vals := range respHeaders {
 		actualVals := resp.Header[http.CanonicalHeaderKey(k)]
 		c.Assert(actualVals, check.DeepEquals, vals)
@@ -201,14 +201,14 @@ func (i *InterceptorTestSuite) TestInterceptorError(c *check.C) {
 	if err != nil {
 		c.Fatal("Couldn't read response: ", err)
 	}
-	// Verify the response from cattle. Since the mock cattle server just echos the request it received,
+	// Verify the response from the control platform. The mock server echoes the request it receives,
 	// the response should match the modified response.
-	cattleRespBody := map[string]interface{}{}
-	if err = json.NewDecoder(resp.Body).Decode(&cattleRespBody); err != nil {
-		c.Fatal("Coudln't decode mock cattle response: ", err)
+	platformRespBody := map[string]interface{}{}
+	if err = json.NewDecoder(resp.Body).Decode(&platformRespBody); err != nil {
+		c.Fatal("Couldn't decode mock platform response: ", err)
 	}
-	c.Assert(cattleRespBody["status"], check.Equals, "400")
-	c.Assert(cattleRespBody["message"], check.Equals, "Bad Request error from Mock Interceptor")
+	c.Assert(platformRespBody["status"], check.Equals, "400")
+	c.Assert(platformRespBody["message"], check.Equals, "Bad Request error from Mock Interceptor")
 }
 
 type mockInterceptor struct {
@@ -232,11 +232,11 @@ func (m *mockInterceptor) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(rw).Encode(m.response)
 }
 
-type mockCattleServer struct {
+type mockPlatformServer struct {
 	c *check.C
 }
 
-func (m *mockCattleServer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+func (m *mockPlatformServer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	body, err := ioutil.ReadAll(req.Body)
 	if err != nil {
 		m.c.Fatal("Error reading body", err)
@@ -255,7 +255,7 @@ func getInterceptorTestConfig() *Config {
 	ports := map[int]bool{443: true}
 	config := &Config{
 		ListenAddr:               "127.0.0.1:5550",
-		CattleAddr:               "127.0.0.1:5551",
+		PlatformAddr:             "127.0.0.1:5551",
 		ProxyProtoHTTPSPorts:     ports,
 		APIInterceptorConfigFile: "test-config.json",
 	}

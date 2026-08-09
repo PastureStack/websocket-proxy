@@ -2,12 +2,12 @@
 package proxy
 
 import (
+	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 type accessLog struct {
@@ -18,20 +18,28 @@ type accessLog struct {
 func logAccess(w http.ResponseWriter, req *http.Request, duration time.Duration) {
 	clientIP := req.RemoteAddr
 
-	if colon := strings.LastIndex(clientIP, ":"); colon != -1 {
-		clientIP = clientIP[:colon]
+	if host, _, err := net.SplitHostPort(clientIP); err == nil {
+		clientIP = host
 	}
 
 	record := &accessLog{
 		ip:          clientIP,
 		method:      req.Method,
-		uri:         req.RequestURI,
+		uri:         safeAccessPath(req),
 		protocol:    req.Proto,
 		host:        req.Host,
 		elapsedTime: duration,
 	}
 
 	writeAccessLog(record)
+}
+
+func safeAccessPath(req *http.Request) string {
+	path := req.URL.EscapedPath()
+	if path == "" {
+		return "/"
+	}
+	return path
 }
 
 func writeAccessLog(record *accessLog) {

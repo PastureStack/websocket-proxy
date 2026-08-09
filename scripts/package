@@ -1,13 +1,37 @@
-
 #!/bin/bash
-set -e
+set -euo pipefail
 
-cd $(dirname $0)/..
+source "$(dirname "$0")/version"
+cd "$(dirname "$0")/.."
 
-if [ ! -e bin/websocket-proxy ]; then
+if [[ ! "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Packaging requires VERSION_OVERRIDE or an exact numeric semantic-version tag" >&2
+    exit 1
+fi
+
+if [ ! -x bin/websocket-proxy ]; then
     ./scripts/build
 fi
 
+version="${VERSION#v}"
+arch="${ARCH:-amd64}"
+artifact="websocket-proxy-${version}-linux-${arch}.tar.xz"
+source_date_epoch="${SOURCE_DATE_EPOCH:-0}"
+package_dir="$(mktemp -d)"
+cleanup()
+{
+    rm -rf "${package_dir}"
+}
+trap cleanup EXIT
+
 mkdir -p dist/artifacts
-cd bin/
-tar cvJf ../dist/artifacts/websocket-proxy.tar.xz .
+install -m 0755 bin/websocket-proxy "${package_dir}/websocket-proxy"
+tar --sort=name \
+    --mtime="@${source_date_epoch}" \
+    --owner=0 \
+    --group=0 \
+    --numeric-owner \
+    -C "${package_dir}" \
+    -cJf "dist/artifacts/${artifact}" \
+    websocket-proxy
+sha256sum "dist/artifacts/${artifact}"

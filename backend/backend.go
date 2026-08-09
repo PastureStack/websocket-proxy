@@ -1,15 +1,16 @@
 package backend
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 
-	"github.com/rancher/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/common"
 )
 
 // Handler is the iterface passed into ConnectToProxy() to have messages routed to and from the handler.
@@ -18,22 +19,42 @@ type Handler interface {
 }
 
 func ConnectToProxy(proxyURL string, handlers map[string]Handler) error {
-	log.WithFields(log.Fields{"url": proxyURL}).Info("Connecting to proxy.")
+	parsedProxyURL, err := url.Parse(proxyURL)
+	if err != nil || parsedProxyURL == nil || (parsedProxyURL.Scheme != "ws" && parsedProxyURL.Scheme != "wss") ||
+		parsedProxyURL.Host == "" || parsedProxyURL.User != nil || parsedProxyURL.Fragment != "" || parsedProxyURL.Opaque != "" {
+		return fmt.Errorf("invalid proxy WebSocket endpoint")
+	}
+	endpoint := proxyLogEndpoint(proxyURL)
+	log.WithField("endpoint", endpoint).Info("Connecting to proxy.")
 
-	dialer := &websocket.Dialer{}
+	dialer := &websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	headers := http.Header{}
 	ws, _, err := dialer.Dial(proxyURL, headers)
 	if err != nil {
-		log.WithFields(log.Fields{
-			"error": err,
-		}).Error("Failed to connect to proxy.")
-		return err
+		log.WithField("endpoint", endpoint).Error("Failed to connect to proxy.")
+		return proxyDialError(proxyURL)
 	}
 
 	return connectToProxyWS(ws, handlers)
 }
 
+func proxyDialError(rawURL string) error {
+	return fmt.Errorf("proxy WebSocket connection to %s failed", proxyLogEndpoint(rawURL))
+}
+
+func proxyLogEndpoint(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<invalid>"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
 func connectToProxyWS(ws *websocket.Conn, handlers map[string]Handler) error {
+	ws.SetReadLimit(common.MaxWireMessageBytes)
 	responders := make(map[string]chan string)
 	responseChannel := make(chan common.Message, 10)
 
@@ -48,9 +69,19 @@ func connectToProxyWS(ws *websocket.Conn, handlers map[string]Handler) error {
 					return
 				}
 				data := common.FormatMessage(message.Key, message.Type, message.Body)
-				ws.WriteMessage(1, []byte(data))
+				if len(data) > common.MaxWireMessageBytes {
+					_ = ws.Close()
+					return
+				}
+				if err := ws.WriteMessage(websocket.TextMessage, []byte(data)); err != nil {
+					_ = ws.Close()
+					return
+				}
 			case <-ticker.C:
-				ws.WriteControl(websocket.PingMessage, []byte(""), time.Now().Add(time.Second))
+				if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+					_ = ws.Close()
+					return
+				}
 			}
 		}
 	}()
@@ -69,7 +100,12 @@ func connectToProxyWS(ws *websocket.Conn, handlers map[string]Handler) error {
 			return err
 		}
 
-		message := common.ParseMessage(string(msg))
+		message, err := common.ParseMessageSafe(string(msg))
+		if err != nil {
+			log.WithField("error", err).Warn("Received malformed proxy message; closing connection.")
+			_ = ws.Close()
+			return err
+		}
 		switch message.Type {
 		case common.Connect:
 			requestURL, err := url.Parse(message.Body)
@@ -122,7 +158,7 @@ func getHandler(path string, handlers map[string]Handler) (Handler, bool) {
 	path = strings.TrimSuffix(path, "/")
 	for key, handler := range handlers {
 		key = strings.TrimSuffix(key, "/")
-		if strings.HasPrefix(path, key) {
+		if path == key || strings.HasPrefix(path, key+"/") {
 			return handler, true
 		}
 	}

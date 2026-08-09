@@ -1,12 +1,21 @@
 package main
 
 import (
-	log "github.com/Sirupsen/logrus"
+	"fmt"
+	"os"
 
-	"github.com/rancher/websocket-proxy/proxy"
+	log "github.com/sirupsen/logrus"
+
+	"github.com/PastureStack/websocket-proxy/proxy"
 )
 
+var VERSION = "0.0.0"
+
 func main() {
+	if versionRequested(os.Args[1:]) {
+		fmt.Printf("pasturestack-websocket-proxy version %s\n", VERSION)
+		return
+	}
 
 	conf, err := proxy.GetConfig()
 	if err != nil {
@@ -69,7 +78,7 @@ func main() {
 			"/v2/{containerstats:containerstats(\\/service)?(\\/)?}",
 			"/v2/{containerstats:containerstats}/{containerid}",
 		},
-		CattleWSProxyPaths: []string{
+		PlatformWSProxyPaths: []string{
 			"/v1/{sub:subscribe}",
 			"/v1/projects/{project}/{sub:subscribe}",
 			"/v2-beta/{sub:subscribe}",
@@ -77,16 +86,34 @@ func main() {
 			"/v2/{sub:subscribe}",
 			"/v2/projects/{project}/{sub:subscribe}",
 		},
-		CattleProxyPaths: []string{
-			"/{cattle-proxy:.*}",
+		PlatformProxyPaths: []string{
+			"/{platform-proxy:.*}",
 		},
 		Config: conf,
 	}
 
-	log.Infof("Starting websocket proxy. Listening on [%s], Proxying to cattle API at [%s], Monitoring parent pid [%v].",
-		conf.ListenAddr, conf.CattleAddr, conf.ParentPid)
+	log.Infof("%s Listening on [%s], proxying to the control-platform API at [%s], monitoring parent pid [%v].",
+		operatorMessage(conf.Locale, "start"),
+		conf.ListenAddr, conf.PlatformAddr, conf.ParentPid)
 
 	err = p.StartProxy()
 
-	log.WithFields(log.Fields{"error": err}).Info("Exiting proxy.")
+	log.WithFields(log.Fields{"error": err}).Info(operatorMessage(conf.Locale, "exit"))
+}
+
+func versionRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--version" || arg == "-version" {
+			return true
+		}
+	}
+	return false
+}
+
+func operatorMessage(locale, key string) string {
+	messages := map[string]map[string]string{
+		"en-US": {"start": "Starting PastureStack WebSocket proxy.", "exit": "WebSocket proxy stopped."},
+		"zh-TW": {"start": "正在啟動 PastureStack WebSocket 代理服務。", "exit": "WebSocket 代理服務已停止。"},
+	}
+	return messages[locale][key]
 }

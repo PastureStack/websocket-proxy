@@ -1,13 +1,12 @@
 package apiinterceptor
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
-
-	"github.com/pkg/errors"
 )
 
-//APIInterceptor is a wrapper over the mux interceptor that does the path<->filters matching
+// APIInterceptor is a wrapper over the mux interceptor that does the path<->filters matching
 type APIInterceptor struct {
 	interceptorRouter http.Handler
 	mu                *sync.RWMutex
@@ -31,14 +30,14 @@ func (h *APIInterceptor) setRouter(router http.Handler) {
 	h.mu.Unlock()
 }
 
-func NewInterceptor(configFile string, cattleAddr string) (http.Handler, error) {
+func NewInterceptor(configFile string, platformAddr string) (http.Handler, error) {
 	apiInterceptor := &APIInterceptor{
 		mu: &sync.RWMutex{},
 	}
 
-	router, err := newRouter(configFile, cattleAddr, apiInterceptor)
+	router, err := newRouter(configFile, platformAddr, apiInterceptor)
 	if err != nil {
-		return nil, errors.Wrap(err, "Couldn't configure api proxy handler")
+		return nil, fmt.Errorf("couldn't configure API proxy handler: %w", err)
 	}
 
 	apiInterceptor.setRouter(router)

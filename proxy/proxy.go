@@ -14,30 +14,33 @@ import (
 	"syscall"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
-	"github.com/docker/docker/pkg/tlsconfig"
+	"github.com/PastureStack/websocket-proxy/k8s"
+	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor"
+	"github.com/PastureStack/websocket-proxy/proxy/proxyprotocol"
+	proxyTls "github.com/PastureStack/websocket-proxy/proxy/tls"
 	"github.com/gorilla/mux"
-	"github.com/pkg/errors"
-	"github.com/rancher/websocket-proxy/k8s"
-	"github.com/rancher/websocket-proxy/proxy/apiinterceptor"
-	"github.com/rancher/websocket-proxy/proxy/proxyprotocol"
-	proxyTls "github.com/rancher/websocket-proxy/proxy/tls"
+	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 )
 
 var slashRegex = regexp.MustCompile("[/]{2,}")
 
 type Starter struct {
-	BackendPaths       []string
-	FrontendPaths      []string
-	FrontendHTTPPaths  []string
-	StatsPaths         []string
-	CattleProxyPaths   []string
-	CattleWSProxyPaths []string
-	Config             *Config
+	BackendPaths         []string
+	FrontendPaths        []string
+	FrontendHTTPPaths    []string
+	StatsPaths           []string
+	PlatformProxyPaths   []string
+	PlatformWSProxyPaths []string
+	Config               *Config
 }
 
 func (s *Starter) StartProxy() error {
 	switcher := NewSwitcher(s.Config)
+	tokenLookup, err := newTokenLookup(s.Config.PlatformAddr)
+	if err != nil {
+		return fmt.Errorf("invalid service-proxy configuration: %w", err)
+	}
 
 	backendMultiplexers := make(map[string]*multiplexer)
 	bpm := &backendProxyManager{
@@ -45,10 +48,12 @@ func (s *Starter) StartProxy() error {
 		mu:           &sync.RWMutex{},
 	}
 
-	frontendHandler := switcher.Wrap(&FrontendHandler{
+	frontendBaseHandler := &FrontendHandler{
 		backend:         bpm,
 		parsedPublicKey: s.Config.PublicKey,
-	})
+	}
+	frontendHandler := switcher.Wrap(frontendBaseHandler)
+	persistentSessionHandler := switcher.Wrap(NewPersistentSessionHandler(frontendBaseHandler, bpm))
 
 	statsHandler := switcher.Wrap(&StatsHandler{
 		backend:         bpm,
@@ -66,18 +71,19 @@ func (s *Starter) StartProxy() error {
 			parsedPublicKey: s.Config.PublicKey,
 		},
 		HTTPSPorts:  s.Config.ProxyProtoHTTPSPorts,
-		TokenLookup: NewTokenLookup(s.Config.CattleAddr),
+		TokenLookup: tokenLookup,
 	})
 
-	cattleProxy, cattleWsProxy, err := newCattleProxies(s.Config)
+	platformProxy, platformWsProxy, err := newPlatformProxies(s.Config)
 	if err != nil {
-		log.Fatalf("Couldn't create cattle proxies: %v", err)
+		log.Fatalf("Couldn't create platform proxies: %v", err)
 	}
 
 	router := mux.NewRouter()
 
 	router.HandleFunc("/version", k8s.Version)
 	router.HandleFunc("/swaggerapi/api/v1", k8s.Swagger)
+	router.Handle("/v1/exec/sessions/{sessionId}", persistentSessionHandler).Methods("GET", "POST", "DELETE")
 
 	for _, p := range s.BackendPaths {
 		router.Handle(p, backendHandler).Methods("GET")
@@ -92,13 +98,13 @@ func (s *Starter) StartProxy() error {
 		router.Handle(p, statsHandler).Methods("GET")
 	}
 
-	if s.Config.CattleAddr != "" {
-		for _, p := range s.CattleWSProxyPaths {
-			router.Handle(p, cattleWsProxy)
+	if s.Config.PlatformAddr != "" {
+		for _, p := range s.PlatformWSProxyPaths {
+			router.Handle(p, platformWsProxy)
 		}
 
-		for _, p := range s.CattleProxyPaths {
-			router.Handle(p, cattleProxy)
+		for _, p := range s.PlatformProxyPaths {
+			router.Handle(p, platformProxy)
 		}
 	}
 
@@ -129,9 +135,12 @@ func (s *Starter) StartProxy() error {
 	}
 
 	server := &http.Server{
-		Handler:   swarmHandler,
-		Addr:      s.Config.ListenAddr,
-		ConnState: proxyprotocol.StateCleanup,
+		Handler:           swarmHandler,
+		Addr:              s.Config.ListenAddr,
+		ConnState:         proxyprotocol.StateCleanup,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	listener, err := net.Listen("tcp", s.Config.ListenAddr)
@@ -139,7 +148,7 @@ func (s *Starter) StartProxy() error {
 		log.Fatalf("Couldn't create listener: %s\n", err)
 	}
 
-	listener = &proxyprotocol.Listener{Listener: listener}
+	listener = &proxyprotocol.Listener{Listener: listener, TrustedProxyCIDRs: s.Config.TrustedProxyCIDRs}
 
 	if s.Config.TLSListenAddr != "" {
 		tlsConfig, err := s.setupTLS()
@@ -157,7 +166,7 @@ func (s *Starter) StartProxy() error {
 			if err != nil {
 				return err
 			}
-			tlsListener = &proxyprotocol.Listener{Listener: tlsListener}
+			tlsListener = &proxyprotocol.Listener{Listener: tlsListener, TrustedProxyCIDRs: s.Config.TrustedProxyCIDRs}
 			go func() {
 				defer listener.Close()
 				log.Error(server.Serve(tls.NewListener(tlsListener, tlsConfig)))
@@ -170,29 +179,37 @@ func (s *Starter) StartProxy() error {
 }
 
 func (s *Starter) setupTLS() (*tls.Config, error) {
-	if s.Config.CattleAccessKey == "" {
-		return nil, fmt.Errorf("No access key supplied to download cert")
+	if s.Config.PlatformAccessKey == "" {
+		return nil, fmt.Errorf("no access key supplied to download certificate")
 	}
 
 	certs, err := s.Config.GetCerts()
 	if err != nil {
 		return nil, err
 	}
+	return newServerTLSConfig(certs)
+}
 
+func newServerTLSConfig(certs *Certs) (*tls.Config, error) {
+	if certs == nil {
+		return nil, fmt.Errorf("certificate bundle is required")
+	}
 	tlsCert, err := tls.X509KeyPair(certs.Cert, certs.Key)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid server certificate or key: %w", err)
 	}
 
 	clientCas := x509.NewCertPool()
 	if !clientCas.AppendCertsFromPEM(certs.CA) {
-		return nil, err
+		return nil, fmt.Errorf("invalid client certificate authority bundle")
 	}
 
-	tlsConfig := tlsconfig.ServerDefault()
-	tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
-	tlsConfig.ClientCAs = clientCas
-	tlsConfig.Certificates = []tls.Certificate{tlsCert}
+	tlsConfig := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ClientCAs:    clientCas,
+		Certificates: []tls.Certificate{tlsCert},
+	}
 
 	return tlsConfig, nil
 }
@@ -204,6 +221,7 @@ type pathCleaner struct {
 func (p *pathCleaner) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if cleanedPath := p.cleanPath(req.URL.Path); cleanedPath != req.URL.Path {
 		req.URL.Path = cleanedPath
+		req.URL.RawPath = ""
 	}
 	p.router.ServeHTTP(rw, req)
 }
@@ -212,37 +230,41 @@ func (p *pathCleaner) cleanPath(path string) string {
 	return slashRegex.ReplaceAllString(path, "/")
 }
 
-func newWSProxy(config *Config) http.Handler {
-	cattleAddr := config.CattleAddr
+func newWSProxy(config *Config) (http.Handler, error) {
+	baseURL, err := controlPlatformBaseURL(config.PlatformAddr)
+	if err != nil {
+		return nil, err
+	}
+	platformAddr := baseURL.Host
 	director := func(req *http.Request) {
-		req.URL.Scheme = "http"
-		req.URL.Host = cattleAddr
+		req.URL.Scheme = baseURL.Scheme
+		req.URL.Host = platformAddr
 	}
 
-	cattleProxy := &httputil.ReverseProxy{
+	platformProxy := &httputil.ReverseProxy{
 		Director:      director,
 		FlushInterval: time.Millisecond * 100,
 	}
 
 	reverseProxy := &proxyProtocolConverter{
-		p:          cattleProxy,
+		p:          platformProxy,
 		httpsPorts: config.ProxyProtoHTTPSPorts,
 	}
 
-	wsProxy := &cattleWSProxy{
+	wsProxy := &platformWSProxy{
 		reverseProxy: reverseProxy,
-		cattleAddr:   cattleAddr,
+		platformAddr: platformAddr,
 	}
 
-	return wsProxy
+	return wsProxy, nil
 }
 
-func newCattleProxies(config *Config) (*proxyProtocolConverter, *cattleWSProxy, error) {
-	cattleAddr := config.CattleAddr
+func newPlatformProxies(config *Config) (*proxyProtocolConverter, *platformWSProxy, error) {
+	platformAddr := config.PlatformAddr
 
-	apiProxyHandler, err := apiinterceptor.NewInterceptor(config.APIInterceptorConfigFile, cattleAddr)
+	apiProxyHandler, err := apiinterceptor.NewInterceptor(config.APIInterceptorConfigFile, platformAddr)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "Couldn't create API interceptor")
+		return nil, nil, fmt.Errorf("couldn't create API interceptor: %w", err)
 	}
 
 	reverseProxy := &proxyProtocolConverter{
@@ -250,9 +272,9 @@ func newCattleProxies(config *Config) (*proxyProtocolConverter, *cattleWSProxy, 
 		p:          apiProxyHandler,
 	}
 
-	wsProxy := &cattleWSProxy{
+	wsProxy := &platformWSProxy{
 		reverseProxy: reverseProxy,
-		cattleAddr:   cattleAddr,
+		platformAddr: platformAddr,
 	}
 
 	return reverseProxy, wsProxy, nil
@@ -268,13 +290,17 @@ func (h *proxyProtocolConverter) ServeHTTP(rw http.ResponseWriter, req *http.Req
 	h.p.ServeHTTP(rw, req)
 }
 
-type cattleWSProxy struct {
+type platformWSProxy struct {
 	reverseProxy *proxyProtocolConverter
-	cattleAddr   string
+	platformAddr string
 }
 
-func (h *cattleWSProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	if len(req.Header.Get("Upgrade")) > 0 {
+func (h *platformWSProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if websocket.IsWebSocketUpgrade(req) {
+		if !workspaceSameOrigin(req) {
+			http.Error(rw, "Cross-origin websocket request denied", http.StatusForbidden)
+			return
+		}
 		proxyprotocol.AddHeaders(req, h.reverseProxy.httpsPorts)
 		h.serveWebsocket(rw, req)
 	} else {
@@ -282,10 +308,10 @@ func (h *cattleWSProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (h *cattleWSProxy) serveWebsocket(rw http.ResponseWriter, req *http.Request) {
+func (h *platformWSProxy) serveWebsocket(rw http.ResponseWriter, req *http.Request) {
 	// Inspired by https://groups.google.com/forum/#!searchin/golang-nuts/httputil.ReverseProxy$20$2B$20websockets/golang-nuts/KBx9pDlvFOc/01vn1qUyVdwJ
-	target := h.cattleAddr
-	d, err := net.Dial("tcp", target)
+	target := h.platformAddr
+	d, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		log.WithField("error", err).Error("Error dialing websocket backend.")
 		http.Error(rw, "Unable to establish websocket connection: can't dial.", 500)

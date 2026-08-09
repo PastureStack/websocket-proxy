@@ -4,27 +4,29 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"strconv"
 	"strings"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/filters"
+	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/model"
 	"github.com/gorilla/mux"
-	"github.com/pborman/uuid"
-	"github.com/rancher/websocket-proxy/proxy/apiinterceptor/filters"
-	"github.com/rancher/websocket-proxy/proxy/apiinterceptor/model"
+	"github.com/sirupsen/logrus"
 )
 
+const maxInterceptorRequestBodyBytes = 4 << 20
+
 type interceptor struct {
-	configFile         string
-	routerSetter       routerSetter
-	cattleReverseProxy *httputil.ReverseProxy
-	apiFilters         map[string]filters.APIFilter
-	pathPreFilters     map[string][]model.FilterData
-	pathDestinations   map[string]http.Handler
-	routes             []*mux.Route
+	configFile           string
+	routerSetter         routerSetter
+	platformReverseProxy *httputil.ReverseProxy
+	apiFilters           map[string]filters.APIFilter
+	pathPreFilters       map[string][]model.FilterData
+	pathDestinations     map[string]http.Handler
+	routes               []*mux.Route
 }
 
 func (i *interceptor) intercept(w http.ResponseWriter, req *http.Request) {
@@ -43,10 +45,10 @@ func (i *interceptor) intercept(w http.ResponseWriter, req *http.Request) {
 
 	logrus.Debugf("Request Path matched: %v ,Other Matching paths: %v", path, otherPathsMatched)
 
-	bodyBytes, err := ioutil.ReadAll(req.Body)
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, req.Body, maxInterceptorRequestBodyBytes))
 	if err != nil {
-		logrus.Errorf("Error reading request Body %v for path %v", req, path)
-		returnHTTPError(w, req, http.StatusBadRequest, fmt.Sprintf("Error reading json request body, err: %v", err))
+		logrus.WithField("path", path).Warn("API interceptor request body was invalid or too large")
+		returnHTTPError(w, req, http.StatusBadRequest, "Invalid or oversized JSON request body")
 		return
 	}
 
@@ -62,7 +64,7 @@ func (i *interceptor) intercept(w http.ResponseWriter, req *http.Request) {
 
 	headerMap := make(map[string][]string)
 	for key, value := range req.Header {
-		headerMap[key] = value
+		headerMap[key] = append([]string(nil), value...)
 	}
 
 	api := req.URL.Path
@@ -71,13 +73,18 @@ func (i *interceptor) intercept(w http.ResponseWriter, req *http.Request) {
 	inputBody, inputHeaders, destination, proxyErr := i.processPreFilters(path, otherPathsMatched, api, method, jsonInput, headerMap)
 	if proxyErr.Status != "" {
 		//error from some filter
-		logrus.Debugf("Error processing request interceptor %v", proxyErr)
+		logrus.WithField("status", proxyErr.Status).Debug("API request interceptor rejected the request")
 		writeError(w, proxyErr)
 		return
 	}
 
 	jsonStr, err := json.Marshal(inputBody)
-	req.Body = ioutil.NopCloser(bytes.NewReader(jsonStr))
+	if err != nil {
+		logrus.WithField("path", path).Error("API interceptor could not encode the filtered request body")
+		returnHTTPError(w, req, http.StatusInternalServerError, "Unable to encode filtered request body")
+		return
+	}
+	req.Body = io.NopCloser(bytes.NewReader(jsonStr))
 	req.ContentLength = int64(len(jsonStr))
 
 	// In future, consider changing behavior to clear out all headers on request, based on user feedback
@@ -89,12 +96,12 @@ func (i *interceptor) intercept(w http.ResponseWriter, req *http.Request) {
 }
 
 func (i *interceptor) processPreFilters(path string, otherPathsMatched []string, api string, method string, body map[string]interface{}, headers map[string][]string) (map[string]interface{}, map[string][]string, http.Handler, model.ProxyError) {
-	var destinationCattle bool
+	var destinationPlatform bool
 
 	destinationProxy, ok := i.pathDestinations[path]
 	if !ok {
-		destinationProxy = i.cattleReverseProxy
-		destinationCattle = true
+		destinationProxy = i.platformReverseProxy
+		destinationPlatform = true
 	}
 
 	logrus.Debugf("START -- Processing requestInterceptors for request path %v method %v", api, method)
@@ -130,7 +137,7 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 			continue
 		}
 
-		logrus.Debugf("-- Processing requestInterceptor %v for request path %v --", filterData, api)
+		logrus.WithFields(logrus.Fields{"type": filterData.Type, "path": api}).Debug("Processing API request interceptor")
 
 		requestData := model.APIRequestData{}
 		requestData.Body = inputBody
@@ -150,10 +157,10 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 
 		responseData, err := apiFilter.ProcessFilter(filterData, requestData)
 		if err != nil {
-			logrus.Errorf("Error %v processing the interceptor %v", err, filterData)
+			logrus.WithFields(logrus.Fields{"type": filterData.Type, "path": api}).Error("API request interceptor failed")
 			svcErr := model.ProxyError{
 				Status:  strconv.Itoa(http.StatusInternalServerError),
-				Message: fmt.Sprintf("Error %v processing the interceptor %v", err, filterData),
+				Message: "API request interceptor failed",
 			}
 			return inputBody, inputHeaders, nil, svcErr
 		}
@@ -166,8 +173,8 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 			}
 		} else {
 			//error
-			logrus.Errorf("Error response %v - %v while processing the interceptor %v for request path %v", responseData.Status, responseData.Message, filterData, api)
-			message := fmt.Sprintf("Error response while processing the interceptor endpoint %v", filterData.Endpoint)
+			logrus.WithFields(logrus.Fields{"status": responseData.Status, "type": filterData.Type, "path": api}).Warn("API request interceptor returned an error")
+			message := "Error response while processing the API interceptor"
 			if responseData.Message != "" {
 				message = responseData.Message
 			}
@@ -183,8 +190,8 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 	logrus.Debugf("DONE -- Processing requestInterceptors for request path %v", api)
 
 	//send the final body and headers to destination.
-	//if destination is the default Cattle: remove the headers added by authTokenValidator filter since Cattle will authenticate the request itself
-	if destinationCattle {
+	// If the destination is the default control platform, remove headers added by the token filter because the destination authenticates the request itself.
+	if destinationPlatform {
 		delete(inputHeaders, "X-API-Account-Id")
 		delete(inputHeaders, "X-API-Account-Kind")
 		delete(inputHeaders, "X-API-Account-Name")
@@ -194,17 +201,17 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 	return inputBody, inputHeaders, destinationProxy, model.ProxyError{}
 }
 
-func (i *interceptor) cattleProxy(w http.ResponseWriter, req *http.Request) {
-	i.cattleReverseProxy.ServeHTTP(w, req)
+func (i *interceptor) platformProxy(w http.ResponseWriter, req *http.Request) {
+	i.platformReverseProxy.ServeHTTP(w, req)
 }
 
 func (i *interceptor) reload(w http.ResponseWriter, req *http.Request) {
 	logrus.Info("reload proxy config")
-	router, err := buildRouter(i.configFile, i.cattleReverseProxy, i.apiFilters, i.routerSetter)
+	router, err := buildRouter(i.configFile, i.platformReverseProxy, i.apiFilters, i.routerSetter)
 	if err != nil {
 		//failed to reload the config from the config.json
 		logrus.Errorf("reload proxy config failed with error %v", err)
-		returnHTTPError(w, req, http.StatusInternalServerError, fmt.Sprintf("Failed to reload the proxy config with error %v", err))
+		returnHTTPError(w, req, http.StatusInternalServerError, "Failed to reload proxy configuration")
 		return
 	}
 	i.routerSetter.setRouter(router)
@@ -250,11 +257,7 @@ func extractEnvID(requestURL string) string {
 }
 
 func generateUUID() string {
-	newUUID := uuid.NewUUID()
-	logrus.Debugf("uuid generated: %v", newUUID)
-	time, _ := newUUID.Time()
-	logrus.Debugf("time generated: %v", time)
-	return newUUID.String()
+	return common.NewRandomUUID()
 }
 
 func containsPath(strs []string, newStr string) bool {

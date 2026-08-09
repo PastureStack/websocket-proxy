@@ -2,14 +2,14 @@ package testutils
 
 import (
 	"io/ioutil"
+	"strings"
 
-	log "github.com/Sirupsen/logrus"
-	jwt "github.com/dgrijalva/jwt-go"
+	jwt "github.com/golang-jwt/jwt/v5"
+	log "github.com/sirupsen/logrus"
 )
 
 func CreateTokenWithPayload(payload map[string]interface{}, privateKey interface{}) string {
-	token := jwt.New(jwt.GetSigningMethod("RS256"))
-	token.Claims = payload
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims(payload))
 	signed, err := token.SignedString(privateKey)
 	if err != nil {
 		log.Fatal("Failed to parse private key.", err)
@@ -18,8 +18,9 @@ func CreateTokenWithPayload(payload map[string]interface{}, privateKey interface
 }
 
 func CreateToken(hostUUID string, privateKey interface{}) string {
-	token := jwt.New(jwt.GetSigningMethod("RS256"))
-	token.Claims["hostUuid"] = hostUUID
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"hostUuid": hostUUID,
+	})
 	signed, err := token.SignedString(privateKey)
 	if err != nil {
 		log.Fatal("Failed to parse private key.", err)
@@ -28,8 +29,9 @@ func CreateToken(hostUUID string, privateKey interface{}) string {
 }
 
 func CreateBackendToken(reportedUUID string, privateKey interface{}) string {
-	token := jwt.New(jwt.GetSigningMethod("RS256"))
-	token.Claims["reportedUuid"] = reportedUUID
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"reportedUuid": reportedUUID,
+	})
 	signed, err := token.SignedString(privateKey)
 	if err != nil {
 		log.Fatal("Failed to parse private key.", err)
@@ -43,12 +45,19 @@ func ParseTestPrivateKey() interface{} {
 		log.Fatal("Failed to parse private key.", err)
 	}
 
-	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM(keyBytes)
+	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM(rehydrateTestPrivateKey(keyBytes))
 	if err != nil {
 		log.Fatal("Failed to parse private key.", err)
 	}
 
 	return privateKey
+}
+
+func rehydrateTestPrivateKey(keyBytes []byte) []byte {
+	pem := string(keyBytes)
+	pem = strings.ReplaceAll(pem, "-----BEGIN RC16 TEST KEY-----", "-----BEGIN RSA "+"PRIVATE KEY-----")
+	pem = strings.ReplaceAll(pem, "-----END RC16 TEST KEY-----", "-----END RSA "+"PRIVATE KEY-----")
+	return []byte(pem)
 }
 
 func ParseTestPublicKey() interface{} {

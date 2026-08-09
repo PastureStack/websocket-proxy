@@ -11,45 +11,42 @@ const (
 	xForwardedProto string = "X-Forwarded-Proto"
 	xForwardedPort  string = "X-Forwarded-Port"
 	xForwardedFor   string = "X-Forwarded-For"
-	sep             string = ", "
 )
 
 func AddHeaders(req *http.Request, httpsPorts map[int]bool) {
 	proxyProtoInfo := getInfo(req.RemoteAddr)
 	if proxyProtoInfo != nil {
-		if h := req.Header.Get(xForwardedProto); h == "" {
-			var proto string
-			if _, ok := httpsPorts[proxyProtoInfo.ProxyAddr.Port]; ok {
-				proto = "https"
-			} else {
-				proto = "http"
-			}
-			req.Header.Set(xForwardedProto, proto)
+		proto := "http"
+		if _, ok := httpsPorts[proxyProtoInfo.ProxyAddr.Port]; ok {
+			proto = "https"
 		}
-
-		if h := req.Header.Get(xForwardedPort); h == "" {
-			req.Header.Set(xForwardedPort, strconv.Itoa(proxyProtoInfo.ProxyAddr.Port))
-		}
-
-		ip := proxyProtoInfo.ClientAddr.IP.String()
-		if forwardedFors, ok := req.Header[http.CanonicalHeaderKey(xForwardedFor)]; ok {
-			ip = strings.Join(forwardedFors, sep) + sep + ip
-		}
-		req.Header.Set(xForwardedFor, ip)
-
+		req.Header.Set(xForwardedProto, proto)
+		req.Header.Set(xForwardedPort, strconv.Itoa(proxyProtoInfo.ProxyAddr.Port))
+		req.Header.Set(xForwardedFor, proxyProtoInfo.ClientAddr.IP.String())
 	} else if req.TLS != nil {
-		if h := req.Header.Get(xForwardedProto); h == "" {
-			req.Header.Set(xForwardedProto, "https")
-		}
+		req.Header.Set(xForwardedProto, "https")
+		req.Header.Del(xForwardedPort)
+		req.Header.Set(xForwardedFor, requestClientIP(req))
+	} else {
+		req.Header.Set(xForwardedProto, "http")
+		req.Header.Del(xForwardedPort)
+		req.Header.Set(xForwardedFor, requestClientIP(req))
 	}
 }
 
 func AddForwardedFor(req *http.Request) {
-	ip := strings.Split(req.RemoteAddr, ":")[0]
-	if forwardedFors, ok := req.Header[http.CanonicalHeaderKey(xForwardedFor)]; ok {
-		ip = strings.Join(forwardedFors, sep) + sep + ip
+	req.Header.Set(xForwardedFor, requestClientIP(req))
+}
+
+func requestClientIP(req *http.Request) string {
+	if info := getInfo(req.RemoteAddr); info != nil && info.ClientAddr != nil {
+		return info.ClientAddr.IP.String()
 	}
-	req.Header.Set(xForwardedFor, ip)
+	host, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return strings.Trim(req.RemoteAddr, "[]")
 }
 
 func StateCleanup(conn net.Conn, connState http.ConnState) {

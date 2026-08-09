@@ -2,7 +2,7 @@ package model
 
 const SignatureHeader = "X-API-Auth-Signature"
 
-//FilterData defines the properties of a pre/post API filter
+// FilterData defines the properties of a pre/post API filter
 type FilterData struct {
 	Type        string   `json:"type"`
 	Endpoint    string   `json:"endpoint"`
@@ -12,7 +12,7 @@ type FilterData struct {
 	Timeout     string   `json:"timeout"`
 }
 
-//APIRequestData defines the properties of a API Request/Response Body sent to/from a filter
+// APIRequestData defines the properties of a API Request/Response Body sent to/from a filter
 type APIRequestData struct {
 	Headers   map[string][]string    `json:"headers,omitempty"`
 	Body      map[string]interface{} `json:"body,omitempty"`

@@ -1,14 +1,14 @@
 package proxy
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/gorilla/websocket"
-	"github.com/pborman/uuid"
+	log "github.com/sirupsen/logrus"
 
-	"github.com/rancher/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/common"
 )
 
 type multiplexer struct {
@@ -18,32 +18,57 @@ type multiplexer struct {
 	frontendChans     map[string]chan<- common.Message
 	proxyManager      proxyManager
 	frontendMu        *sync.RWMutex
+	connection        *websocket.Conn
+	done              chan struct{}
+	shutdownOnce      sync.Once
 }
 
-func (m *multiplexer) initializeClient() (string, <-chan common.Message) {
-	msgKey := uuid.New()
+func (m *multiplexer) initializeClient() (string, <-chan common.Message, error) {
+	msgKey := common.NewRandomUUID()
 	frontendChan := make(chan common.Message)
 	m.frontendMu.Lock()
 	defer m.frontendMu.Unlock()
+	select {
+	case <-m.done:
+		return "", nil, fmt.Errorf("backend connection is closed")
+	default:
+	}
 	m.frontendChans[msgKey] = frontendChan
-	return msgKey, frontendChan
+	return msgKey, frontendChan, nil
 }
 
-func (m *multiplexer) connect(msgKey, url string) {
-	m.messagesToBackend <- common.FormatMessage(msgKey, common.Connect, url)
+func (m *multiplexer) connect(msgKey, url string) error {
+	return m.enqueue(common.FormatMessage(msgKey, common.Connect, url))
 }
 
-func (m *multiplexer) send(msgKey, msg string) {
-	m.messagesToBackend <- common.FormatMessage(msgKey, common.Body, msg)
+func (m *multiplexer) send(msgKey, msg string) error {
+	return m.enqueue(common.FormatMessage(msgKey, common.Body, msg))
 }
 
-func (m *multiplexer) sendClose(msgKey string) {
-	m.messagesToBackend <- common.FormatMessage(msgKey, common.Close, "")
+func (m *multiplexer) sendClose(msgKey string) error {
+	return m.enqueue(common.FormatMessage(msgKey, common.Close, ""))
 }
 
-func (m *multiplexer) closeConnection(msgKey string, notifyBackend bool) {
+func (m *multiplexer) enqueue(message string) error {
+	if len(message) > common.MaxWireMessageBytes {
+		return fmt.Errorf("backend message exceeds %d bytes", common.MaxWireMessageBytes)
+	}
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-m.done:
+		return fmt.Errorf("backend connection is closed")
+	case m.messagesToBackend <- message:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("timed out queueing backend message")
+	}
+}
+
+func (m *multiplexer) closeConnection(msgKey string, notifyBackend bool) error {
+	var sendErr error
 	if notifyBackend {
-		m.sendClose(msgKey)
+		sendErr = m.sendClose(msgKey)
 	}
 
 	m.frontendMu.Lock()
@@ -52,25 +77,31 @@ func (m *multiplexer) closeConnection(msgKey string, notifyBackend bool) {
 		close(frontendChan)
 		delete(m.frontendChans, msgKey)
 	}
+	return sendErr
 }
 
 func (m *multiplexer) routeMessages(ws *websocket.Conn) {
-	stopSignal := make(chan bool, 1)
-
+	ws.SetReadLimit(common.MaxWireMessageBytes)
 	// Read messages from backend
-	go func(stop chan<- bool) {
+	go func() {
 		for {
 			msgType, msg, err := ws.ReadMessage()
 			if err != nil {
 				log.Infof("Shutting down backend %v. Connection closed because: %v.", m.backendKey, err)
-				m.shutdown(stop)
+				m.shutdown()
 				return
 			}
 
 			if msgType != websocket.TextMessage {
 				continue
 			}
-			message := common.ParseMessage(string(msg))
+			message, parseErr := common.ParseMessageSafe(string(msg))
+			if parseErr != nil {
+				log.WithField("error", parseErr).Warn("Received malformed backend message; closing connection.")
+				m.shutdown()
+				_ = ws.Close()
+				return
+			}
 
 			m.frontendMu.RLock()
 			frontendChan, ok := m.frontendChans[message.Key]
@@ -94,10 +125,10 @@ func (m *multiplexer) routeMessages(ws *websocket.Conn) {
 				m.proxyManager.closeConnection(m.backendKey, message.Key)
 			}
 		}
-	}(stopSignal)
+	}()
 
 	// Write messages to backend
-	go func(stop <-chan bool) {
+	go func() {
 		ticker := time.NewTicker(time.Second * 5)
 		defer ticker.Stop()
 		for {
@@ -110,22 +141,33 @@ func (m *multiplexer) routeMessages(ws *websocket.Conn) {
 				err := ws.WriteMessage(websocket.TextMessage, []byte(message))
 				if err != nil {
 					log.Errorf("Error writing message to backend %v - %v. Error: %v", m.backendKey, m.backendSessionID, err)
-					ws.Close()
+					m.shutdown()
+					return
 				}
 			case <-ticker.C:
-				ws.WriteControl(websocket.PingMessage, []byte(""), time.Now().Add(time.Second))
+				if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+					m.shutdown()
+					return
+				}
 
-			case <-stop:
+			case <-m.done:
 				return
 			}
 		}
-	}(stopSignal)
+	}()
 }
 
-func (m *multiplexer) shutdown(stop chan<- bool) {
-	m.proxyManager.removeBackend(m.backendKey, m.backendSessionID)
-	stop <- true
-	for key := range m.frontendChans {
-		m.closeConnection(key, false)
-	}
+func (m *multiplexer) shutdown() {
+	m.shutdownOnce.Do(func() {
+		close(m.done)
+		_ = m.connection.Close()
+		m.proxyManager.removeBackend(m.backendKey, m.backendSessionID)
+
+		m.frontendMu.Lock()
+		defer m.frontendMu.Unlock()
+		for key, frontendChan := range m.frontendChans {
+			close(frontendChan)
+			delete(m.frontendChans, key)
+		}
+	})
 }

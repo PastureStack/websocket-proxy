@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -15,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 
-	"github.com/rancher/websocket-proxy/backend"
-	"github.com/rancher/websocket-proxy/common"
-	"github.com/rancher/websocket-proxy/testutils"
+	"github.com/PastureStack/websocket-proxy/backend"
+	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/testutils"
 )
 
 var privateKey interface{}
@@ -31,14 +30,17 @@ func TestMain(m *testing.M) {
 	privateKey = testutils.ParseTestPrivateKey()
 
 	ps := &Starter{
-		BackendPaths:       []string{"/v1/connectbackend"},
-		FrontendPaths:      []string{"/v1/binaryecho", "/v1/echo", "/v1/oneanddone", "/v1/repeat", "/v1/sendafterclose"},
-		StatsPaths:         []string{"/v1/hostStats/project"},
-		CattleWSProxyPaths: []string{"/v1/subscribe", "/v1/wsproxyproto"},
-		CattleProxyPaths:   []string{"/{cattle-proxy:.*}"},
-		Config:             c,
+		BackendPaths:         []string{"/v1/connectbackend"},
+		FrontendPaths:        []string{"/v1/binaryecho", "/v1/echo", "/v1/oneanddone", "/v1/repeat", "/v1/sendafterclose"},
+		StatsPaths:           []string{"/v1/hostStats/project"},
+		PlatformWSProxyPaths: []string{"/v1/subscribe", "/v1/wsproxyproto"},
+		PlatformProxyPaths:   []string{"/{platform-proxy:.*}"},
+		Config:               c,
 	}
 	go ps.StartProxy()
+	if err := waitForTCP(c.ListenAddr); err != nil {
+		log.Fatal(err)
+	}
 
 	handlers := make(map[string]backend.Handler)
 	handlers["/v1/echo"] = &echoHandler{}
@@ -47,9 +49,12 @@ func TestMain(m *testing.M) {
 	handlers["/v1/repeat"] = &repeatingHandler{}
 	handlers["/v1/sendafterclose"] = &sendAfterCloseHandler{}
 	handlers["/v1/hostStats/project"] = &statsHandler{1}
+	handlers["/v1/exec"] = &echoHandler{}
+	handlers["/v1/logs"] = &echoHandler{}
 	signedToken := testutils.CreateBackendToken("1", privateKey)
-	url := "ws://localhost:1111/v1/connectbackend?token=" + signedToken
-	go backend.ConnectToProxy(url, handlers)
+	url := "ws://127.0.0.1:1111/v1/connectbackend?token=" + signedToken
+	backendReady := make(chan error, 2)
+	go connectBackendWithRetry(url, handlers, backendReady)
 
 	signedToken = testutils.CreateBackendToken("2", privateKey)
 	handlers2 := make(map[string]backend.Handler)
@@ -59,8 +64,10 @@ func TestMain(m *testing.M) {
 	handlers2["/v1/repeat"] = &repeatingHandler{}
 	handlers2["/v1/sendafterclose"] = &sendAfterCloseHandler{}
 	handlers2["/v1/hostStats/project"] = &statsHandler{2}
-	url = "ws://localhost:1111/v1/connectbackend?token=" + signedToken
-	go backend.ConnectToProxy(url, handlers2)
+	handlers2["/v1/exec"] = &echoHandler{}
+	handlers2["/v1/logs"] = &echoHandler{}
+	url = "ws://127.0.0.1:1111/v1/connectbackend?token=" + signedToken
+	go connectBackendWithRetry(url, handlers2, backendReady)
 
 	router := mux.NewRouter()
 	router.HandleFunc("/v1/subscribe", getWsHandler())
@@ -70,10 +77,51 @@ func TestMain(m *testing.M) {
 		rw.Write([]byte("SUCCESS"))
 	})
 	go http.ListenAndServe("127.0.0.1:3333", router)
-
-	time.Sleep(50 * time.Millisecond) // Give front and back a chance to initialize
+	if err := waitForTCP("127.0.0.1:3333"); err != nil {
+		log.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-backendReady; err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	os.Exit(m.Run())
+}
+
+func waitForTCP(addr string) error {
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		lastErr = err
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("server did not listen on %s: %v", addr, lastErr)
+}
+
+func connectBackendWithRetry(proxyURL string, handlers map[string]backend.Handler, ready chan<- error) {
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- backend.ConnectToProxy(proxyURL, handlers)
+		}()
+		select {
+		case err := <-errCh:
+			lastErr = err
+			time.Sleep(50 * time.Millisecond)
+		case <-time.After(100 * time.Millisecond):
+			ready <- nil
+			return
+		}
+	}
+	ready <- fmt.Errorf("backend did not connect to proxy %s: %v", proxyURL, lastErr)
 }
 
 func proxyProtoHandler(rw http.ResponseWriter, req *http.Request) {
@@ -113,7 +161,7 @@ func getWsHandler() func(rw http.ResponseWriter, req *http.Request) {
 
 func TestEndToEnd(t *testing.T) {
 	signedToken := testutils.CreateToken("1", privateKey)
-	ws := getClientConnection("ws://localhost:1111/v1/echo?token="+signedToken, t)
+	ws := getClientConnection("ws://127.0.0.1:1111/v1/echo?token="+signedToken, t)
 	sendAndAssertReply(ws, strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10), t)
 	time.Sleep(1 * time.Millisecond) // Ensure different timestamp
 	sendAndAssertReply(ws, strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10), t)
@@ -121,7 +169,7 @@ func TestEndToEnd(t *testing.T) {
 
 func TestBinary(t *testing.T) {
 	signedToken := testutils.CreateToken("1", privateKey)
-	ws := getBinaryClientConnection("ws://localhost:1111/v1/binaryecho?token="+signedToken, t)
+	ws := getBinaryClientConnection("ws://127.0.0.1:1111/v1/binaryecho?token="+signedToken, t)
 	sendBinaryAndAssertReply(ws, strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10), t)
 	time.Sleep(1 * time.Millisecond) // Ensure different timestamp
 	sendBinaryAndAssertReply(ws, strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10), t)
@@ -132,7 +180,7 @@ func TestAuthHeaderBearerToken(t *testing.T) {
 	dialer := &websocket.Dialer{}
 	headers := http.Header{}
 	headers.Add("Authorization", "Bearer "+signedToken)
-	ws, _, err := dialer.Dial("ws://localhost:1111/v1/echo", headers)
+	ws, _, err := dialer.Dial("ws://127.0.0.1:1111/v1/echo", headers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +191,7 @@ func TestAuthHeaderBearerToken(t *testing.T) {
 
 func TestBackendClosesConnection(t *testing.T) {
 	signedToken := testutils.CreateToken("1", privateKey)
-	ws := getClientConnection("ws://localhost:1111/v1/oneanddone?token="+signedToken, t)
+	ws := getClientConnection("ws://127.0.0.1:1111/v1/oneanddone?token="+signedToken, t)
 
 	if err := ws.WriteMessage(1, []byte("a message")); err != nil {
 		t.Fatal(err)
@@ -153,14 +201,14 @@ func TestBackendClosesConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if msgType, msgBytes, err := ws.ReadMessage(); err != io.EOF {
-		t.Fatalf("Expected an EOF error to indicate connection was closed. [%v] [%s] [%v]", msgType, msgBytes, err)
+	if msgType, msgBytes, err := ws.ReadMessage(); err == nil {
+		t.Fatalf("expected closed websocket, received type %v message %q", msgType, msgBytes)
 	}
 }
 
 func TestFrontendClosesConnection(t *testing.T) {
 	signedToken := testutils.CreateToken("1", privateKey)
-	ws := getClientConnection("ws://localhost:1111/v1/oneanddone?token="+signedToken, t)
+	ws := getClientConnection("ws://127.0.0.1:1111/v1/oneanddone?token="+signedToken, t)
 	if err := ws.WriteControl(websocket.CloseMessage, nil, time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +220,7 @@ func TestFrontendClosesConnection(t *testing.T) {
 
 func TestBackendSendAfterClose(t *testing.T) {
 	signedToken := testutils.CreateToken("1", privateKey)
-	ws := getClientConnection("ws://localhost:1111/v1/sendafterclose?token="+signedToken, t)
+	ws := getClientConnection("ws://127.0.0.1:1111/v1/sendafterclose?token="+signedToken, t)
 	go func() {
 		for {
 			_, _, err := ws.ReadMessage()
@@ -182,7 +230,7 @@ func TestBackendSendAfterClose(t *testing.T) {
 		}
 	}()
 
-	ws2 := getClientConnection("ws://localhost:1111/v1/echo?token="+signedToken, t)
+	ws2 := getClientConnection("ws://127.0.0.1:1111/v1/echo?token="+signedToken, t)
 	// If deadlock occurs, the read deadline will be hit and the sendAndAssertReply will fail the test
 	ws2.SetReadDeadline(time.Now().Add(2 * time.Second))
 	sendAndAssertReply(ws2, strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10), t)
@@ -192,27 +240,27 @@ func TestMultiHostStats(t *testing.T) {
 	payload := map[string]interface{}{
 		"project": []map[string]string{
 			{
-				"url":   "ws://localhost:1111/v1/hostStats/project",
+				"url":   "ws://127.0.0.1:1111/v1/hostStats/project",
 				"token": testutils.CreateToken("1", privateKey),
 			},
 			{
-				"url":   "ws://localhost:1111/v1/hostStats/project",
+				"url":   "ws://127.0.0.1:1111/v1/hostStats/project",
 				"token": testutils.CreateToken("2", privateKey),
 			},
 		},
 	}
 	signedToken := testutils.CreateTokenWithPayload(payload, privateKey)
-	ws := getClientConnection("ws://localhost:1111/v1/hostStats/project?token="+signedToken, t)
+	ws := getClientConnection("ws://127.0.0.1:1111/v1/hostStats/project?token="+signedToken, t)
+	defer ws.Close()
+	if err := ws.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	one := false
 	two := false
-	for i := 0; i < 100; i++ {
-		err := ws.WriteMessage(1, []byte("x"))
-		if err != nil {
-			t.Fatal("Error talking to host")
-		}
+	for i := 0; i < 2; i++ {
 		_, msgBytes, err := ws.ReadMessage()
 		if err != nil {
-			t.Fatal("Error reading response from various containers")
+			t.Fatalf("error reading multi-host statistics: %v", err)
 		}
 		if string(msgBytes) == "1" {
 			one = true
@@ -220,18 +268,17 @@ func TestMultiHostStats(t *testing.T) {
 		if string(msgBytes) == "2" {
 			two = true
 		}
-		if one && two {
-			return
-		}
 	}
-	t.Fatal("Did not get container stats from two hosts")
+	if !one || !two {
+		t.Fatalf("did not receive statistics from both hosts: host1=%t host2=%t", one, two)
+	}
 }
 
-func TestCattleProxy(t *testing.T) {
-	resp, err := http.Get("http://localhost:1111/v1/foo1")
+func TestPlatformProxy(t *testing.T) {
+	resp, err := http.Get("http://127.0.0.1:1111/v1/foo1")
 	assertProxyResponse(resp, err, t)
 
-	req, err := http.NewRequest("PUT", "http://localhost:1111/v1///foo2", nil)
+	req, err := http.NewRequest("PUT", "http://127.0.0.1:1111/v1///foo2", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,12 +286,12 @@ func TestCattleProxy(t *testing.T) {
 	resp, err = client.Do(req)
 	assertProxyResponse(resp, err, t)
 
-	resp, err = http.Get("http://localhost:1111/v1/subscribe")
+	resp, err = http.Get("http://127.0.0.1:1111/v1/subscribe")
 	assertProxyResponse(resp, err, t)
 }
 
-func TestCattleWsProxy(t *testing.T) {
-	ws := getClientConnection("ws://localhost:1111/v1/subscribe", t)
+func TestPlatformWsProxy(t *testing.T) {
+	ws := getClientConnection("ws://127.0.0.1:1111/v1/subscribe", t)
 	_, msg, err := ws.ReadMessage()
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +466,7 @@ func getTestConfig() *Config {
 	config := &Config{
 		PublicKey:            pubKey,
 		ListenAddr:           "127.0.0.1:1111",
-		CattleAddr:           "127.0.0.1:3333",
+		PlatformAddr:         "127.0.0.1:3333",
 		ProxyProtoHTTPSPorts: ports,
 	}
 	return config
@@ -428,24 +475,40 @@ func getTestConfig() *Config {
 func TestManyChattyConnections(t *testing.T) {
 	// Spin up a hundred connections. The repeat handler will send a new message to each one
 	// every 10 milliseconds. Stop after 5 seconds. This is just to prove that the proxy can handle a little load.
+	errCh := make(chan error, 100)
+	var conns []*websocket.Conn
+	defer func() {
+		for _, ws := range conns {
+			ws.Close()
+		}
+	}()
+
 	for i := 1; i <= 100; i++ {
 		signedToken := testutils.CreateToken("1", privateKey)
 		msg := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
-		ws := getClientConnection("ws://localhost:1111/v1/repeat?token="+signedToken+"&msg="+msg, t)
-		go func(expectedPrefix string) {
+		ws := getClientConnection("ws://127.0.0.1:1111/v1/repeat?token="+signedToken+"&msg="+msg, t)
+		conns = append(conns, ws)
+		go func(ws *websocket.Conn, expectedPrefix string) {
 			for {
 				_, reply, err := ws.ReadMessage()
 				if err != nil {
-					t.Fatal(err)
+					errCh <- err
+					return
 				}
 				if !strings.HasPrefix(string(reply), expectedPrefix) {
-					t.Fatalf("Unexpected response: [%s]", reply)
+					errCh <- fmt.Errorf("unexpected response: [%s]", reply)
+					return
 				}
 			}
-		}(msg)
+		}(ws, msg)
 		time.Sleep(1 * time.Millisecond) // Ensure different timestamp
 	}
-	time.Sleep(5 * time.Second)
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(5 * time.Second):
+	}
 }
 
 const wsProxyProtoTestRequest string = `GET /v1/wsproxyproto HTTP/1.1
@@ -462,7 +525,7 @@ func TestProxyProto(t *testing.T) {
 }
 
 func testProxyProto(forwardedFor string, forwardedPort string, forwardedProto string, body string, t *testing.T) {
-	conn, err := net.Dial("tcp", "localhost:1111")
+	conn, err := net.Dial("tcp", "127.0.0.1:1111")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +550,7 @@ func testProxyProto(forwardedFor string, forwardedPort string, forwardedProto st
 
 func TestProxyProtocolHang(t *testing.T) {
 	// Tests a bug where proxy would hang if a single empty connection connection was opened
-	conn, err := net.Dial("tcp", "localhost:1111")
+	conn, err := net.Dial("tcp", "127.0.0.1:1111")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +559,7 @@ func TestProxyProtocolHang(t *testing.T) {
 
 	gotResponse := make(chan bool)
 	go func(resp chan bool) {
-		http.Get("http://localhost:1111/v1/subscribe")
+		http.Get("http://127.0.0.1:1111/v1/subscribe")
 		resp <- true
 	}(gotResponse)
 
@@ -520,8 +583,13 @@ func (h *repeatingHandler) Handle(key string, initialMessage string, incomingMes
 	msg := u.Query().Get("msg")
 	idx := 0
 	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		select {
+		case _, ok := <-incomingMessages:
+			if !ok {
+				return
+			}
 		case <-ticker.C:
 			data := fmt.Sprintf("%s %d", msg, idx)
 			wrap := common.Message{

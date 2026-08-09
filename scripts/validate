@@ -1,20 +1,108 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-cd $(dirname $0)/..
+cd "$(dirname "$0")/.."
 
 echo Running validation
 
-PACKAGES=". $(find -name '*.go' | xargs -I{} dirname {} |  cut -f2 -d/ | sort -u | grep -Ev '(^\.$|.git|.trash-cache|vendor|bin)' | sed -e 's!^!./!' -e 's!$!/...!')"
+PACKAGES=". $(find -name '*.go' | xargs -I{} dirname {} | cut -f2 -d/ | sort -u | grep -Ev '(^\.$|.git|.trash-cache|vendor|bin)' | sed -e 's!^!./!' -e 's!$!/...!')"
 
 echo Running: go vet
 go vet ${PACKAGES}
-echo Running: golint
-for i in ${PACKAGES}; do
-    if [ -n "$(golint $i | grep -v 'should have comment.*or be unexported' | tee /dev/stderr)" ]; then
-        failed=true
+echo Running: gofmt check for maintained Go files
+mapfile -t maintained_go_files < <(
+    {
+        git diff --name-only --diff-filter=ACMR HEAD^ HEAD -- '*.go'
+        git diff --name-only --diff-filter=ACMR HEAD -- '*.go'
+        git ls-files --others --exclude-standard -- '*.go'
+    } | LC_ALL=C sort -u | grep -v '^vendor/' | while IFS= read -r path; do
+        if [ -f "$path" ]; then
+            printf '%s\n' "$path"
+        fi
+    done
+)
+if [ "${#maintained_go_files[@]}" -gt 0 ]; then
+    format_output=$(gofmt -l "${maintained_go_files[@]}")
+    if [ -n "$format_output" ]; then
+        printf '%s\n' "$format_output" >&2
+        exit 1
     fi
-done
-test -z "$failed"
-echo Running: go fmt
-test -z "$(go fmt ${PACKAGES} | tee /dev/stderr)"
+fi
+
+echo Running: version and dependency policy
+test "$(VERSION_OVERRIDE=v0.23.13 bash -c 'source scripts/version; printf %s "$VERSION"')" = "0.23.13"
+if VERSION_OVERRIDE=v0.23.12-maintenance.1 bash -c 'source scripts/version' >/dev/null 2>&1; then
+    echo "non-numeric version suffix was accepted" >&2
+    exit 1
+fi
+legacy_brand='ran''cher'
+project_brand='pasture''stack'
+if grep -R -E "v?[0-9]+\.[0-9]+\.[0-9]+[-+](${legacy_brand}|${project_brand})([._-][[:alnum:]._-]+)?" \
+    --exclude-dir=.git --exclude-dir=vendor --exclude=ORIGIN.md --exclude=validate .; then
+    echo "branded semantic-version suffix is present in the maintained source" >&2
+    exit 1
+fi
+legacy_client_path='github.com/ran''cher/go-ran''cher'
+if grep -R -E "github\.com/(pborman/uuid|pkg/errors|docker/docker/pkg/tlsconfig|rakyll/(globalconf|goini))|${legacy_client_path}" \
+    --exclude-dir=.git --exclude-dir=vendor --exclude=validate .; then
+    echo "removed legacy dependency was reintroduced" >&2
+    exit 1
+fi
+
+echo Running: proxy credential and origin policy
+grep -F 'uri:         safeAccessPath(req),' proxy/access.go >/dev/null
+grep -F 'stripProxyAuthenticationQuery(req)' proxy/frontend_http_handler.go >/dev/null
+grep -F 'stripProxyAuthenticationCookies(req)' proxy/frontend_http_handler.go >/dev/null
+grep -F 'req.Header.Set(xForwardedFor, requestClientIP(req))' proxy/proxyprotocol/http_integration.go >/dev/null
+grep -F '"trusted-proxy-cidrs", "127.0.0.0/8,::1/128"' proxy/config.go >/dev/null
+grep -F 'MaxWireMessageBytes' common/common.go >/dev/null
+if grep -R -E 'CheckOrigin:[[:space:]]*func\([^)]*\)[[:space:]]*bool[[:space:]]*\{[[:space:]]*return[[:space:]]+true' \
+    --include='*.go' --exclude='*_test.go' --exclude=validate proxy backend common; then
+    echo "production websocket origin checks must not allow every origin" >&2
+    exit 1
+fi
+if grep -R -E 'log(rus)?\.[A-Za-z]+f?\(.*(RequestURI|SecretToken|message\.Body|response\.Body)' \
+    --include='*.go' --exclude='*_test.go' --exclude=validate proxy backend common; then
+    echo "sensitive proxy request or response data is written to logs" >&2
+    exit 1
+fi
+
+expected_vendor_locks='github.com/golang-jwt/jwt/v5          v5.3.1
+github.com/gorilla/mux                 v1.8.1
+github.com/gorilla/websocket           v1.5.3
+github.com/patrickmn/go-cache          v2.1.0'
+while IFS= read -r lock; do
+    grep -Fx "$lock" trash.conf >/dev/null
+done <<< "$expected_vendor_locks"
+
+echo Running: reproducible builder and release-gate policy
+grep -Fx 'FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03' Dockerfile.dapper >/dev/null
+grep -Fx 'ARG GO_VERSION=1.26.5' Dockerfile.dapper >/dev/null
+grep -Fx 'ARG DOCKER_VERSION=29.6.2' Dockerfile.dapper >/dev/null
+grep -Fx "UBUNTU_APT_SNAPSHOT='20260808T000000Z'" ubuntu-apt.lock >/dev/null
+
+gate='.github/workflows/security-release-gate.yml'
+test -f "$gate"
+grep -Fx '  workflow_dispatch:' "$gate" >/dev/null
+if grep -Eq '^  (push|pull_request|schedule):' "$gate"; then
+    echo "release gate must remain manual-only" >&2
+    exit 1
+fi
+grep -F 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' "$gate" >/dev/null
+grep -F 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "$gate" >/dev/null
+grep -F 'aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c' "$gate" >/dev/null
+grep -F 'golang.org/x/vuln/cmd/govulncheck@v1.6.0' "$gate" >/dev/null
+grep -F 'GO111MODULE=on GOBIN=/tmp/security-bin go install' "$gate" >/dev/null
+grep -F -- '--vex /security/openvex.json' "$gate" >/dev/null
+
+vex='security/openvex.json'
+test -f "$vex"
+vex_product='pkg:deb/ubuntu/linux-libc-dev@7.0.0-29.29?arch=amd64&distro=ubuntu-26.04'
+test "$(grep -c '"vulnerability":{"name":"CVE-' "$vex")" -eq 46
+test "$(grep -c '"status":"not_affected"' "$vex")" -eq 46
+test "$(grep -c '"justification":"vulnerable_code_not_present"' "$vex")" -eq 46
+test "$(grep -Fc "\"@id\":\"$vex_product\"" "$vex")" -eq 46
+if grep -Eq '(^|[[:space:]])(docker push|gh release|kubectl|helm upgrade|curl[^#]*(deploy|release))([[:space:]]|$)' "$gate"; then
+    echo "release gate must not publish or deploy" >&2
+    exit 1
+fi

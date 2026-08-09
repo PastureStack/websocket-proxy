@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-
-	"github.com/Sirupsen/logrus"
-	"github.com/gorilla/mux"
-	"github.com/rancher/websocket-proxy/common"
 	"sync"
+
+	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
 )
 
 type BackendHTTPWriter struct {
@@ -21,6 +21,7 @@ type BackendHTTPWriter struct {
 func (b *BackendHTTPWriter) Close() error {
 	b.mu.Lock()
 	if b.closed {
+		b.mu.Unlock()
 		return nil
 	}
 	b.closed = true
@@ -37,7 +38,7 @@ func (b *BackendHTTPWriter) WriteRequest(req *http.Request, hijack bool, address
 
 	headers := http.Header{}
 	for k, v := range req.Header {
-		headers[k] = v
+		headers[k] = append([]string(nil), v...)
 	}
 
 	url := *req.URL
@@ -77,7 +78,15 @@ func (b *BackendHTTPWriter) writeMessage(message *common.HTTPMessage) error {
 		return err
 	}
 
-	logrus.Debugf("BACKEND WRITE %s,%s: %s", b.hostKey, b.msgKey, data)
+	logrus.WithFields(logrus.Fields{
+		"hostKey":     b.hostKey,
+		"messageKey":  b.msgKey,
+		"method":      message.Method,
+		"headerCount": len(message.Headers),
+		"bodyBytes":   len(message.Body),
+		"statusCode":  message.Code,
+		"eof":         message.EOF,
+	}).Debug("Backend HTTP message queued")
 	return b.backend.send(b.hostKey, b.msgKey, string(data))
 }
 
