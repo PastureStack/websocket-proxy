@@ -1,7 +1,7 @@
 TARGETS := $(shell ls scripts)
 DAPPER_IMAGE ?= pasturestack-websocket-proxy-dapper:ubuntu26
 DAPPER_SOURCE ?= /go/src/github.com/PastureStack/websocket-proxy
-DOCKER_VERSION ?= 29.6.2
+DOCKER_VERSION ?= 29.7.2
 
 .dapper-image: Dockerfile.dapper
 	docker build \
@@ -25,13 +25,9 @@ $(TARGETS): .dapper-image
 		-e SOURCE_DATE_EPOCH \
 		$(DAPPER_IMAGE) $@
 
-trash:
-	@echo "Dependencies are vendored; no external dependency fetch is required."
-
-trash-keep: trash
-
-deps: trash
+deps:
+	@echo "Dependencies are locked by go.mod/go.sum and vendored for offline builds."
 
 .DEFAULT_GOAL := ci
 
-.PHONY: $(TARGETS) deps trash trash-keep
+.PHONY: $(TARGETS) deps

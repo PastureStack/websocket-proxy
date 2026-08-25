@@ -8,7 +8,7 @@ echo Running validation
 PACKAGES=". $(find -name '*.go' | xargs -I{} dirname {} | cut -f2 -d/ | sort -u | grep -Ev '(^\.$|.git|.trash-cache|vendor|bin)' | sed -e 's!^!./!' -e 's!$!/...!')"
 
 echo Running: go vet
-go vet ${PACKAGES}
+go vet -mod=vendor ${PACKAGES}
 echo Running: gofmt check for maintained Go files
 mapfile -t maintained_go_files < <(
     {
@@ -67,18 +67,28 @@ if grep -R -E 'log(rus)?\.[A-Za-z]+f?\(.*(RequestURI|SecretToken|message\.Body|r
     exit 1
 fi
 
-expected_vendor_locks='github.com/golang-jwt/jwt/v5          v5.3.1
-github.com/gorilla/mux                 v1.8.1
-github.com/gorilla/websocket           v1.5.3
-github.com/patrickmn/go-cache          v2.1.0'
+expected_vendor_locks='github.com/golang-jwt/jwt/v5 v5.3.1
+github.com/gorilla/mux v1.8.1
+github.com/gorilla/websocket v1.5.3
+github.com/sirupsen/logrus v1.10.1
+golang.org/x/sys v0.47.0'
 while IFS= read -r lock; do
-    grep -Fx "$lock" trash.conf >/dev/null
+    grep -Fx "# $lock" vendor/modules.txt >/dev/null
 done <<< "$expected_vendor_locks"
+
+test -f go.mod
+test -f go.sum
+test -f vendor/modules.txt
+if grep -R -E 'GO111MODULE=off|GO15VENDOREXPERIMENT|trash\.conf' \
+    --exclude-dir=.git --exclude-dir=vendor --exclude=validate .; then
+    echo "legacy GOPATH dependency mode was reintroduced" >&2
+    exit 1
+fi
 
 echo Running: reproducible builder and release-gate policy
 grep -Fx 'FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03' Dockerfile.dapper >/dev/null
-grep -Fx 'ARG GO_VERSION=1.26.5' Dockerfile.dapper >/dev/null
-grep -Fx 'ARG DOCKER_VERSION=29.6.2' Dockerfile.dapper >/dev/null
+grep -Fx 'ARG GO_VERSION=1.27.0' Dockerfile.dapper >/dev/null
+grep -Fx 'ARG DOCKER_VERSION=29.7.2' Dockerfile.dapper >/dev/null
 grep -Fx "UBUNTU_APT_SNAPSHOT='20260808T000000Z'" ubuntu-apt.lock >/dev/null
 
 gate='.github/workflows/security-release-gate.yml'
@@ -90,8 +100,8 @@ if grep -Eq '^  (push|pull_request|schedule):' "$gate"; then
 fi
 grep -F 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' "$gate" >/dev/null
 grep -F 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "$gate" >/dev/null
-grep -F 'aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c' "$gate" >/dev/null
-grep -F 'golang.org/x/vuln/cmd/govulncheck@v1.6.0' "$gate" >/dev/null
+grep -F 'aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969' "$gate" >/dev/null
+grep -F 'golang.org/x/vuln/cmd/govulncheck@v1.7.0' "$gate" >/dev/null
 grep -F 'GO111MODULE=on GOBIN=/tmp/security-bin go install' "$gate" >/dev/null
 grep -F -- '--vex /security/openvex.json' "$gate" >/dev/null
 

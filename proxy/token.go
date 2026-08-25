@@ -13,10 +13,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/patrickmn/go-cache"
 	"github.com/sirupsen/logrus"
 )
 
@@ -26,10 +26,70 @@ const (
 	defaultService               = "swarm:2375"
 	maxServiceProxyResponseBytes = 1 << 20
 	serviceProxyRequestTimeout   = 15 * time.Second
+	tokenCacheTTL                = 30 * time.Second
+	maxTokenCacheEntries         = 4096
 )
 
+type tokenCacheEntry struct {
+	token     string
+	expiresAt time.Time
+}
+
+type tokenCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	now     func() time.Time
+	entries map[string]tokenCacheEntry
+}
+
+func newTokenCache(ttl time.Duration) *tokenCache {
+	return &tokenCache{
+		ttl:     ttl,
+		now:     time.Now,
+		entries: make(map[string]tokenCacheEntry),
+	}
+}
+
+func (c *tokenCache) set(key, token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := c.now()
+	var earliestKey string
+	var earliestExpiry time.Time
+	for existingKey, entry := range c.entries {
+		if !entry.expiresAt.After(now) {
+			delete(c.entries, existingKey)
+			continue
+		}
+		if earliestKey == "" || entry.expiresAt.Before(earliestExpiry) {
+			earliestKey = existingKey
+			earliestExpiry = entry.expiresAt
+		}
+	}
+	if _, exists := c.entries[key]; !exists && len(c.entries) >= maxTokenCacheEntries {
+		delete(c.entries, earliestKey)
+	}
+	c.entries[key] = tokenCacheEntry{token: token, expiresAt: now.Add(c.ttl)}
+}
+
+func (c *tokenCache) get(key string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[key]
+	if !ok {
+		return "", false
+	}
+	if !entry.expiresAt.After(c.now()) {
+		delete(c.entries, key)
+		return "", false
+	}
+	return entry.token, true
+}
+
 type TokenLookup struct {
-	cache              *cache.Cache
+	cache              *tokenCache
 	client             http.Client
 	platformAccessKey  string
 	platformServiceKey string
@@ -42,7 +102,7 @@ func NewTokenLookup(platformAddr string) *TokenLookup {
 		return lookup
 	}
 	lookup = &TokenLookup{
-		cache: cache.New(30*time.Second, 30*time.Second),
+		cache: newTokenCache(tokenCacheTTL),
 	}
 	lookup.client.Timeout = serviceProxyRequestTimeout
 	lookup.client.CheckRedirect = func(*http.Request, []*http.Request) error {
@@ -58,7 +118,7 @@ func newTokenLookup(platformAddr string) (*TokenLookup, error) {
 	}
 	serviceProxyURL := baseURL.ResolveReference(&url.URL{Path: "/v1/serviceproxies"})
 	t := &TokenLookup{
-		cache:           cache.New(30*time.Second, 30*time.Second),
+		cache:           newTokenCache(tokenCacheTTL),
 		serviceProxyURL: serviceProxyURL.String(),
 	}
 	t.client.Timeout = serviceProxyRequestTimeout
@@ -80,7 +140,7 @@ func (t *TokenLookup) Lookup(r *http.Request) (string, error) {
 	}
 
 	if token != "" {
-		t.cache.Set(cacheKey, token, cache.DefaultExpiration)
+		t.cache.set(cacheKey, token)
 	}
 
 	return token, err
@@ -88,9 +148,9 @@ func (t *TokenLookup) Lookup(r *http.Request) (string, error) {
 
 func (t *TokenLookup) getFromCache(r *http.Request) (string, string) {
 	key := genKey(r)
-	value, ok := t.cache.Get(key)
+	value, ok := t.cache.get(key)
 	if ok {
-		return key, value.(string)
+		return key, value
 	}
 	return key, ""
 }

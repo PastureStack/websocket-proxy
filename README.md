@@ -9,9 +9,9 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 ## Project status
 
 The reviewed source produces the numeric-version candidate `v0.23.13`. It uses
-Go 1.26.5 and Docker CLI 29.6.2, a digest-locked Ubuntu 26.04 build image, a
-dated Ubuntu snapshot, exact direct-package versions, and checksum-verified
-toolchain archives. Product-owned imports, configuration fields, proxy
+Go 1.27.0 and Docker CLI 29.7.2, a digest-locked Ubuntu 26.04 build image, a
+dated Ubuntu snapshot, Go module checksums, an offline vendored dependency
+set, and checksum-verified toolchain archives. Product-owned imports, configuration fields, proxy
 identifiers, filter filenames, and operator messages use PastureStack naming.
 The repository does not publish packages or deploy a service automatically.
 
@@ -20,8 +20,9 @@ old TLS, UUID, configuration, and error helpers with narrowly scoped standard
 library code. Certificate discovery remains schema-driven, but every request
 has a timeout, bounded response size, authenticated same-origin URL policy,
 status validation, and bounded ZIP extraction. TLS listeners require TLS 1.2
-or newer. Current vendored dependency provenance is recorded in
-[`vendor/UPSTREAM.md`](vendor/UPSTREAM.md).
+or newer. Current dependency provenance is locked by `go.mod`, `go.sum`, and
+`vendor/modules.txt`; a readable summary is recorded in
+[`DEPENDENCIES.md`](DEPENDENCIES.md).
 
 ## Configuration
 

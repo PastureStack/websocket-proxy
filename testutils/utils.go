@@ -1,12 +1,21 @@
 package testutils
 
 import (
-	"io/ioutil"
+	_ "embed"
 	"strings"
 
 	jwt "github.com/golang-jwt/jwt/v5"
 	log "github.com/sirupsen/logrus"
 )
+
+// Test keys are embedded so consumers of this helper package do not depend on
+// their current working directory.
+//
+//go:embed private.pem
+var testPrivateKeyPEM []byte
+
+//go:embed public.pem
+var testPublicKeyPEM []byte
 
 func CreateTokenWithPayload(payload map[string]interface{}, privateKey interface{}) string {
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims(payload))
@@ -40,12 +49,7 @@ func CreateBackendToken(reportedUUID string, privateKey interface{}) string {
 }
 
 func ParseTestPrivateKey() interface{} {
-	keyBytes, err := ioutil.ReadFile("../testutils/private.pem")
-	if err != nil {
-		log.Fatal("Failed to parse private key.", err)
-	}
-
-	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM(rehydrateTestPrivateKey(keyBytes))
+	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM(rehydrateTestPrivateKey(testPrivateKeyPEM))
 	if err != nil {
 		log.Fatal("Failed to parse private key.", err)
 	}
@@ -61,12 +65,7 @@ func rehydrateTestPrivateKey(keyBytes []byte) []byte {
 }
 
 func ParseTestPublicKey() interface{} {
-	keyBytes, err := ioutil.ReadFile("../testutils/public.pem")
-	if err != nil {
-		log.Fatal("Failed to parse public key.", err)
-	}
-
-	publicKey, err := jwt.ParseRSAPublicKeyFromPEM(keyBytes)
+	publicKey, err := jwt.ParseRSAPublicKeyFromPEM(testPublicKeyPEM)
 	if err != nil {
 		log.Fatal("Failed to parse public key.", err)
 	}
