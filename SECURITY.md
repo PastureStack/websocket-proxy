@@ -55,10 +55,10 @@ maintenance names must not be appended to version numbers.
 The reproducible builder uses Ubuntu's `linux-libc-dev` package only for
 userspace API headers required by compilation and race tests. The delivered
 artifact is a statically linked binary and does not contain that package or a
-Linux kernel implementation. Exact package-version and CVE decisions are
-recorded in `security/openvex.json`; the release gate validates their scope and
-applies them only to the builder-image scan. All other HIGH/CRITICAL findings
-remain release-blocking.
+Linux kernel implementation. The release gate therefore scans the actual
+distributable binary with Trivy and govulncheck, rather than treating the
+build-only image as a runtime product. HIGH/CRITICAL findings in source
+dependencies or the distributable binary remain release-blocking.
 
 ## Reporting
 

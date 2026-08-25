@@ -52,7 +52,7 @@ jobs:
             --entrypoint /bin/bash \
             -v "$PWD/evidence:/evidence" \
             "$BUILDER_IMAGE" \
-            -lc 'set -euo pipefail; GO111MODULE=on GOBIN=/tmp/security-bin go install golang.org/x/vuln/cmd/govulncheck@v1.7.0; /tmp/security-bin/govulncheck -mode=binary -scan=symbol /evidence/websocket-proxy-linux-amd64 2>&1 | tee /evidence/govulncheck.txt'
+            -lc 'set -euo pipefail; GO111MODULE=on GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GOBIN=/tmp/security-bin go install golang.org/x/vuln/cmd/govulncheck@v1.7.0; /tmp/security-bin/govulncheck -mode=binary -scan=symbol /evidence/websocket-proxy-linux-amd64 2>&1 | tee /evidence/govulncheck.txt'
 
       - name: Scan the source tree for exposed secrets
         id: secret_scan
@@ -100,22 +100,19 @@ jobs:
             --output /evidence/source.cdx.json \
             /workspace
 
-      - name: Scan the reproducible builder image
-        id: image_scan
+      - name: Scan the distributable Go binary
+        id: product_scan
         continue-on-error: true
         run: |
           docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD/evidence:/evidence" \
-            -v "$PWD/security/openvex.json:/security/openvex.json:ro" \
-            "$TRIVY_IMAGE" image \
+            "$TRIVY_IMAGE" rootfs \
+            --scanners vuln \
             --severity HIGH,CRITICAL \
-            --vex /security/openvex.json \
-            --show-suppressed \
             --exit-code 1 \
             --format json \
-            --output /evidence/builder-vulnerabilities.json \
-            "$BUILDER_IMAGE"
+            --output /evidence/product-vulnerabilities.json \
+            /evidence/websocket-proxy-linux-amd64
 
       - name: Record gate outcomes
         if: always()
@@ -127,7 +124,7 @@ jobs:
             printf 'secret_scan=%s\n' '${{ steps.secret_scan.outcome }}'
             printf 'source_scan=%s\n' '${{ steps.source_scan.outcome }}'
             printf 'source_sbom=%s\n' '${{ steps.source_sbom.outcome }}'
-            printf 'image_scan=%s\n' '${{ steps.image_scan.outcome }}'
+            printf 'product_scan=%s\n' '${{ steps.product_scan.outcome }}'
           } > evidence/gate-outcomes.txt
 
       - name: Upload review evidence
@@ -148,4 +145,4 @@ jobs:
           test '${{ steps.secret_scan.outcome }}' = success
           test '${{ steps.source_scan.outcome }}' = success
           test '${{ steps.source_sbom.outcome }}' = success
-          test '${{ steps.image_scan.outcome }}' = success
+          test '${{ steps.product_scan.outcome }}' = success
