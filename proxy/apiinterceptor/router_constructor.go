@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/filters"
 	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/filters/auth"
 	httpfilter "github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/filters/http"
@@ -68,7 +69,7 @@ func buildRouter(configFile string, platformRevProxy *httputil.ReverseProxy, api
 	if configFile != "" {
 		if _, err := os.Stat(configFile); os.IsNotExist(err) {
 			// Treat a missing file as empty configuration; the control plane removes it when no filters are configured.
-			log.Debugf("config.json file not found %v", configFile)
+			log.Debugf("API interceptor config file not found: %s", logsafe.Value(configFile))
 		} else {
 			configContent, err := readBoundedConfigFile(configFile)
 			if err != nil {
@@ -118,7 +119,7 @@ func buildRouter(configFile string, platformRevProxy *httputil.ReverseProxy, api
 		//build interceptor Paths
 		for _, path := range filter.Paths {
 			for _, method := range filter.Methods {
-				log.Infof("Adding route: %v %v", strings.ToUpper(method), path)
+				log.Infof("Adding route: %s %s", logsafe.Value(strings.ToUpper(method)), logsafe.Value(path))
 				router.Methods(strings.ToUpper(method)).Path(path).HandlerFunc(http.HandlerFunc(interceptor.intercept))
 			}
 		}

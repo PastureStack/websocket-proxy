@@ -11,6 +11,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 )
 
 // Handler is the iterface passed into ConnectToProxy() to have messages routed to and from the handler.
@@ -25,13 +26,13 @@ func ConnectToProxy(proxyURL string, handlers map[string]Handler) error {
 		return fmt.Errorf("invalid proxy WebSocket endpoint")
 	}
 	endpoint := proxyLogEndpoint(proxyURL)
-	log.WithField("endpoint", endpoint).Info("Connecting to proxy.")
+	log.WithField("endpoint", logsafe.Value(endpoint)).Info("Connecting to proxy.")
 
 	dialer := &websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	headers := http.Header{}
 	ws, _, err := dialer.Dial(proxyURL, headers)
 	if err != nil {
-		log.WithField("endpoint", endpoint).Error("Failed to connect to proxy.")
+		log.WithField("endpoint", logsafe.Value(endpoint)).Error("Failed to connect to proxy.")
 		return proxyDialError(proxyURL)
 	}
 
@@ -93,7 +94,7 @@ func connectToProxyWS(ws *websocket.Conn, handlers map[string]Handler) error {
 	for {
 		_, msg, err := ws.ReadMessage()
 		if err != nil {
-			log.WithFields(log.Fields{"error": err}).Error("Received error reading from socket. Exiting.")
+			log.WithField("error", logsafe.Value(err)).Error("Received error reading from socket. Exiting.")
 			for _, msgChan := range responders {
 				close(msgChan)
 			}
@@ -102,7 +103,7 @@ func connectToProxyWS(ws *websocket.Conn, handlers map[string]Handler) error {
 
 		message, err := common.ParseMessageSafe(string(msg))
 		if err != nil {
-			log.WithField("error", err).Warn("Received malformed proxy message; closing connection.")
+			log.WithField("error", logsafe.Value(err)).Warn("Received malformed proxy message; closing connection.")
 			_ = ws.Close()
 			return err
 		}
@@ -119,7 +120,7 @@ func connectToProxyWS(ws *websocket.Conn, handlers map[string]Handler) error {
 				responders[message.Key] = msgChan
 				go handler.Handle(message.Key, message.Body, msgChan, responseChannel)
 			} else {
-				log.WithFields(log.Fields{"path": requestURL.Path}).Warn("Could not find appropriate message handler for supplied path.")
+				log.WithField("path", logsafe.Value(requestURL.Path)).Warn("Could not find appropriate message handler for supplied path.")
 				responseChannel <- common.Message{
 					Key:  message.Key,
 					Type: common.Close,
@@ -129,7 +130,7 @@ func connectToProxyWS(ws *websocket.Conn, handlers map[string]Handler) error {
 			if msgChan, ok := responders[message.Key]; ok {
 				msgChan <- message.Body
 			} else {
-				log.WithFields(log.Fields{"key": message.Key}).Warn("Could not find responder for specified key.")
+				log.WithField("key", logsafe.Value(message.Key)).Warn("Could not find responder for specified key.")
 				responseChannel <- common.Message{
 					Key:  message.Key,
 					Type: common.Close,
@@ -138,7 +139,7 @@ func connectToProxyWS(ws *websocket.Conn, handlers map[string]Handler) error {
 		case common.Close:
 			closeHandler(responders, message.Key)
 		default:
-			log.WithFields(log.Fields{"messageType": message.Type}).Warn("Unrecognized message type. Closing connection.")
+			log.WithField("messageType", logsafe.Value(message.Type)).Warn("Unrecognized message type. Closing connection.")
 			closeHandler(responders, message.Key)
 			SignalHandlerClosed(message.Key, responseChannel)
 			continue

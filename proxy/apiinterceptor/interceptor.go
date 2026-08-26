@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/filters"
 	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/model"
 	"github.com/gorilla/mux"
@@ -43,11 +44,14 @@ func (i *interceptor) intercept(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	logrus.Debugf("Request Path matched: %v ,Other Matching paths: %v", path, otherPathsMatched)
+	logrus.WithFields(logrus.Fields{
+		"path":              logsafe.Value(path),
+		"otherMatchesCount": len(otherPathsMatched),
+	}).Debug("API request path matched")
 
 	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, req.Body, maxInterceptorRequestBodyBytes))
 	if err != nil {
-		logrus.WithField("path", path).Warn("API interceptor request body was invalid or too large")
+		logrus.WithField("path", logsafe.Value(path)).Warn("API interceptor request body was invalid or too large")
 		returnHTTPError(w, req, http.StatusBadRequest, "Invalid or oversized JSON request body")
 		return
 	}
@@ -56,7 +60,7 @@ func (i *interceptor) intercept(w http.ResponseWriter, req *http.Request) {
 	if len(bodyBytes) > 0 {
 		err = json.Unmarshal(bodyBytes, &jsonInput)
 		if err != nil {
-			logrus.Errorf("Error unmarshalling json request body: %v", err)
+			logrus.Errorf("Error unmarshalling JSON request body: %s", logsafe.Value(err))
 			returnHTTPError(w, req, http.StatusBadRequest, fmt.Sprintf("Error reading json request body: %v", err))
 			return
 		}
@@ -73,14 +77,14 @@ func (i *interceptor) intercept(w http.ResponseWriter, req *http.Request) {
 	inputBody, inputHeaders, destination, proxyErr := i.processPreFilters(path, otherPathsMatched, api, method, jsonInput, headerMap)
 	if proxyErr.Status != "" {
 		//error from some filter
-		logrus.WithField("status", proxyErr.Status).Debug("API request interceptor rejected the request")
+		logrus.WithField("status", logsafe.Value(proxyErr.Status)).Debug("API request interceptor rejected the request")
 		writeError(w, proxyErr)
 		return
 	}
 
 	jsonStr, err := json.Marshal(inputBody)
 	if err != nil {
-		logrus.WithField("path", path).Error("API interceptor could not encode the filtered request body")
+		logrus.WithField("path", logsafe.Value(path)).Error("API interceptor could not encode the filtered request body")
 		returnHTTPError(w, req, http.StatusInternalServerError, "Unable to encode filtered request body")
 		return
 	}
@@ -104,7 +108,10 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 		destinationPlatform = true
 	}
 
-	logrus.Debugf("START -- Processing requestInterceptors for request path %v method %v", api, method)
+	logrus.WithFields(logrus.Fields{
+		"path":   logsafe.Value(api),
+		"method": logsafe.Value(method),
+	}).Debug("Processing API request interceptors")
 	inputBody := body
 	inputHeaders := headers
 	//add uuid
@@ -137,7 +144,7 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 			continue
 		}
 
-		logrus.WithFields(logrus.Fields{"type": filterData.Type, "path": api}).Debug("Processing API request interceptor")
+		logrus.WithFields(logrus.Fields{"type": logsafe.Value(filterData.Type), "path": logsafe.Value(api)}).Debug("Processing API request interceptor")
 
 		requestData := model.APIRequestData{}
 		requestData.Body = inputBody
@@ -151,13 +158,13 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 
 		apiFilter, ok := i.apiFilters[filterData.Type]
 		if !ok {
-			logrus.Errorf("Skipping interceptor type %v doesn't exist.", filterData.Type)
+			logrus.Errorf("Skipping unknown interceptor type %s", logsafe.Value(filterData.Type))
 			continue
 		}
 
 		responseData, err := apiFilter.ProcessFilter(filterData, requestData)
 		if err != nil {
-			logrus.WithFields(logrus.Fields{"type": filterData.Type, "path": api}).Error("API request interceptor failed")
+			logrus.WithFields(logrus.Fields{"type": logsafe.Value(filterData.Type), "path": logsafe.Value(api)}).Error("API request interceptor failed")
 			svcErr := model.ProxyError{
 				Status:  strconv.Itoa(http.StatusInternalServerError),
 				Message: "API request interceptor failed",
@@ -173,7 +180,11 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 			}
 		} else {
 			//error
-			logrus.WithFields(logrus.Fields{"status": responseData.Status, "type": filterData.Type, "path": api}).Warn("API request interceptor returned an error")
+			logrus.WithFields(logrus.Fields{
+				"status": logsafe.Value(responseData.Status),
+				"type":   logsafe.Value(filterData.Type),
+				"path":   logsafe.Value(api),
+			}).Warn("API request interceptor returned an error")
 			message := "Error response while processing the API interceptor"
 			if responseData.Message != "" {
 				message = responseData.Message
@@ -187,7 +198,7 @@ func (i *interceptor) processPreFilters(path string, otherPathsMatched []string,
 			return inputBody, inputHeaders, nil, svcErr
 		}
 	}
-	logrus.Debugf("DONE -- Processing requestInterceptors for request path %v", api)
+	logrus.WithField("path", logsafe.Value(api)).Debug("Finished processing API request interceptors")
 
 	//send the final body and headers to destination.
 	// If the destination is the default control platform, remove headers added by the token filter because the destination authenticates the request itself.
@@ -210,7 +221,7 @@ func (i *interceptor) reload(w http.ResponseWriter, req *http.Request) {
 	router, err := buildRouter(i.configFile, i.platformReverseProxy, i.apiFilters, i.routerSetter)
 	if err != nil {
 		//failed to reload the config from the config.json
-		logrus.Errorf("reload proxy config failed with error %v", err)
+		logrus.Errorf("Reload proxy config failed: %s", logsafe.Value(err))
 		returnHTTPError(w, req, http.StatusInternalServerError, "Failed to reload proxy configuration")
 		return
 	}
@@ -228,7 +239,7 @@ func returnHTTPError(w http.ResponseWriter, r *http.Request, httpStatus int, err
 func writeError(w http.ResponseWriter, svcError model.ProxyError) {
 	status, err := strconv.Atoi(svcError.Status)
 	if err != nil {
-		logrus.Errorf("Error writing error response %v", err)
+		logrus.Errorf("Error writing error response: %s", logsafe.Value(err))
 		w.Write([]byte(svcError.Message))
 		return
 	}
@@ -237,7 +248,7 @@ func writeError(w http.ResponseWriter, svcError model.ProxyError) {
 
 	jsonStr, err := json.Marshal(svcError)
 	if err != nil {
-		logrus.Errorf("Error writing error response %v", err)
+		logrus.Errorf("Error writing error response: %s", logsafe.Value(err))
 		w.Write([]byte(svcError.Message))
 		return
 	}

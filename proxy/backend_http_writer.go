@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )
@@ -27,7 +28,7 @@ func (b *BackendHTTPWriter) Close() error {
 	b.closed = true
 	b.mu.Unlock()
 
-	logrus.Debugf("BACKEND WRITE EOF %s", b.msgKey)
+	logrus.Debugf("BACKEND WRITE EOF %s", logsafe.Value(b.msgKey))
 	return b.writeMessage(&common.HTTPMessage{
 		EOF: true,
 	})
@@ -79,9 +80,9 @@ func (b *BackendHTTPWriter) writeMessage(message *common.HTTPMessage) error {
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"hostKey":     b.hostKey,
-		"messageKey":  b.msgKey,
-		"method":      message.Method,
+		"hostKey":     logsafe.Value(b.hostKey),
+		"messageKey":  logsafe.Value(b.msgKey),
+		"method":      logsafe.Value(message.Method),
 		"headerCount": len(message.Headers),
 		"bodyBytes":   len(message.Body),
 		"statusCode":  message.Code,

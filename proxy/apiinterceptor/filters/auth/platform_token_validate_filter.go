@@ -12,6 +12,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/filters"
 	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor/model"
 )
@@ -74,7 +75,13 @@ func (f *TokenValidationFilter) ProcessFilter(filter model.FilterData, input mod
 
 	envid := input.EnvID
 
-	log.Debugf("Request => api=%s method=%s env=%s headers=%v bodyKeys=%v", input.APIPath, input.APIMethod, envid, headerKeys(input.Headers), bodyKeys(input.Body))
+	log.WithFields(log.Fields{
+		"api":          logsafe.Value(input.APIPath),
+		"method":       logsafe.Value(input.APIMethod),
+		"environment":  logsafe.Value(envid),
+		"headerCount":  len(input.Headers),
+		"bodyKeyCount": len(input.Body),
+	}).Debug("Validating API request token")
 
 	requestHeaders := http.Header(input.Headers)
 	authHeader := requestHeaders.Values("Authorization")
@@ -97,7 +104,11 @@ func (f *TokenValidationFilter) ProcessFilter(filter model.FilterData, input mod
 
 	//check if the token value is empty or not
 	if tokenValue != "" || len(authHeader) >= 1 {
-		log.Debugf("auth token present via cookie=%v authorizationHeader=%v env=%s", tokenValue != "", len(authHeader) >= 1, envid)
+		log.WithFields(log.Fields{
+			"cookiePresent":              tokenValue != "",
+			"authorizationHeaderPresent": len(authHeader) >= 1,
+			"environment":                logsafe.Value(envid),
+		}).Debug("Authentication token present")
 
 		projectID, accountID, kind, name := "", "", "", ""
 		var err error
@@ -144,7 +155,10 @@ func (f *TokenValidationFilter) ProcessFilter(filter model.FilterData, input mod
 		output.Headers = headerBody
 		output.Status = http.StatusOK
 
-		log.Debugf("Response <= status=%d headers=%v", output.Status, headerKeys(output.Headers))
+		log.WithFields(log.Fields{
+			"status":      output.Status,
+			"headerCount": len(output.Headers),
+		}).Debug("Token validation response received")
 	}
 
 	return output, nil

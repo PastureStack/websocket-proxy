@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/sirupsen/logrus"
 )
 
@@ -12,7 +13,7 @@ func NewHTTPPipe(rw http.ResponseWriter, backend backendProxy, hostKey string) (
 		return nil, nil, err
 	}
 
-	logrus.Debugf("BACKEND PIPE %s %s", hostKey, msgKey)
+	logrus.Debugf("BACKEND PIPE %s %s", logsafe.Value(hostKey), logsafe.Value(msgKey))
 
 	if err = backend.connect(hostKey, msgKey, "/v1/container-proxy/"); err != nil {
 		backend.closeConnection(hostKey, msgKey)

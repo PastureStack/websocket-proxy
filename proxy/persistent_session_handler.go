@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
@@ -251,7 +252,7 @@ func (h *PersistentSessionHandler) createSession(rw http.ResponseWriter, req *ht
 		case errWorkspaceSessionLimit:
 			writeWorkspaceJSONError(rw, http.StatusTooManyRequests, "session_limit", "Console session limit reached")
 		default:
-			log.WithField("error", err).Error("Failed to create persistent workspace session.")
+			log.WithField("error", logsafe.Value(err)).Error("Failed to create persistent workspace session.")
 			writeWorkspaceJSONError(rw, http.StatusBadGateway, "upstream_unavailable", "Unable to start the console session")
 		}
 		return
@@ -636,7 +637,7 @@ func (s *persistentSession) terminate(reason string) {
 		s.mu.Unlock()
 
 		if err := s.backend.closeConnection(s.hostKey, s.msgKey); err != nil {
-			log.WithFields(log.Fields{"error": err, "reason": reason}).Warn("Failed to close persistent workspace backend.")
+			log.WithFields(log.Fields{"error": logsafe.Value(err), "reason": logsafe.Value(reason)}).Warn("Failed to close persistent workspace backend.")
 			s.markEnded()
 		}
 	})

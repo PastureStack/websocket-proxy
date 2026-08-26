@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
 )
@@ -88,7 +89,7 @@ func (b *backendProxyManager) hasBackend(backendKey string) bool {
 
 func (b *backendProxyManager) addBackend(backendKey string, ws *websocket.Conn) {
 	sessionID := common.NewRandomUUID()
-	logrus.Infof("Registering backend for host %v with session ID %v.", backendKey, sessionID)
+	logrus.Infof("Registering backend for host %s with session ID %s.", logsafe.Value(backendKey), logsafe.Value(sessionID))
 
 	msgs := make(chan string, 10)
 	clients := make(map[string]chan<- common.Message)
@@ -120,10 +121,10 @@ func (b *backendProxyManager) removeBackend(backendKey, sessionID string) {
 	if m, ok := b.multiplexers[backendKey]; ok {
 		if m.backendSessionID == sessionID {
 			delete(b.multiplexers, backendKey)
-			logrus.Infof("Removed backend. Key: %v. Session ID %v .", backendKey, sessionID)
+			logrus.Infof("Removed backend. Key: %s. Session ID %s.", logsafe.Value(backendKey), logsafe.Value(sessionID))
 		} else {
-			logrus.Infof("Not removing backend for key %v. The provided session ID %v doesn't match registered session ID %v.",
-				backendKey, sessionID, m.backendSessionID)
+			logrus.Infof("Not removing backend for key %s. The provided session ID %s doesn't match registered session ID %s.",
+				logsafe.Value(backendKey), logsafe.Value(sessionID), logsafe.Value(m.backendSessionID))
 		}
 	}
 }
