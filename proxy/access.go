@@ -4,9 +4,9 @@ package proxy
 import (
 	"net"
 	"net/http"
-	"strconv"
 	"time"
 
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -43,6 +43,12 @@ func safeAccessPath(req *http.Request) string {
 }
 
 func writeAccessLog(record *accessLog) {
-	logRecord := "" + record.ip + " " + record.protocol + " " + record.method + ": " + record.uri + ", host: " + record.host + " (load time: " + strconv.FormatFloat(record.elapsedTime.Seconds(), 'f', 5, 64) + " seconds)"
-	log.Info(logRecord)
+	log.WithFields(log.Fields{
+		"clientIP":       logsafe.Value(record.ip),
+		"protocol":       logsafe.Value(record.protocol),
+		"method":         logsafe.Value(record.method),
+		"path":           logsafe.Value(record.uri),
+		"host":           logsafe.Value(record.host),
+		"elapsedSeconds": record.elapsedTime.Seconds(),
+	}).Info("HTTP access")
 }

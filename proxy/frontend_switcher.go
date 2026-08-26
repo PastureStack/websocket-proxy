@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/sirupsen/logrus"
 )
 
@@ -48,7 +49,7 @@ func (s *Switcher) lookupHandler() http.Handler {
 }
 
 func (s *Switcher) start() {
-	logrus.Infof("Master config file: %s", s.config.MasterFile)
+	logrus.Infof("Master config file: %s", logsafe.Value(s.config.MasterFile))
 	if s.config.MasterFile == "" {
 		s.clear()
 		return
@@ -56,7 +57,7 @@ func (s *Switcher) start() {
 
 	for {
 		if err := s.readConfig(); err != nil {
-			logrus.Errorf("Failed to read config: %v", err)
+			logrus.Errorf("Failed to read config: %s", logsafe.Value(err))
 		}
 		time.Sleep(5 * time.Second)
 	}
@@ -98,7 +99,7 @@ func (s *Switcher) readConfig() error {
 	}
 
 	s.Lock()
-	logrus.Infof("Master address: %s", newAddr)
+	logrus.Infof("Master address: %s", logsafe.Value(newAddr))
 	s.addr = newAddr
 	s.remote = remote
 	s.Unlock()

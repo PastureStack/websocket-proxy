@@ -9,6 +9,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 )
 
 type multiplexer struct {
@@ -87,7 +88,7 @@ func (m *multiplexer) routeMessages(ws *websocket.Conn) {
 		for {
 			msgType, msg, err := ws.ReadMessage()
 			if err != nil {
-				log.Infof("Shutting down backend %v. Connection closed because: %v.", m.backendKey, err)
+				log.Infof("Shutting down backend %s. Connection closed because: %s.", logsafe.Value(m.backendKey), logsafe.Value(err))
 				m.shutdown()
 				return
 			}
@@ -97,7 +98,7 @@ func (m *multiplexer) routeMessages(ws *websocket.Conn) {
 			}
 			message, parseErr := common.ParseMessageSafe(string(msg))
 			if parseErr != nil {
-				log.WithField("error", parseErr).Warn("Received malformed backend message; closing connection.")
+				log.WithField("error", logsafe.Value(parseErr)).Warn("Received malformed backend message; closing connection.")
 				m.shutdown()
 				_ = ws.Close()
 				return
@@ -116,12 +117,12 @@ func (m *multiplexer) routeMessages(ws *websocket.Conn) {
 			m.frontendMu.RUnlock()
 
 			if timedOut {
-				log.Warnf("Timed out sending message with key %v to frontend channel.", message.Key)
+				log.Warnf("Timed out sending message with key %s to frontend channel.", logsafe.Value(message.Key))
 				m.proxyManager.closeConnection(m.backendKey, message.Key)
 			}
 
 			if !ok && message.Type != common.Close {
-				log.Infof("Couldn't find frontend channel for key %v. Closing frontend connection.", m.backendKey)
+				log.Infof("Couldn't find frontend channel for key %s. Closing frontend connection.", logsafe.Value(m.backendKey))
 				m.proxyManager.closeConnection(m.backendKey, message.Key)
 			}
 		}
@@ -140,7 +141,7 @@ func (m *multiplexer) routeMessages(ws *websocket.Conn) {
 				ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				err := ws.WriteMessage(websocket.TextMessage, []byte(message))
 				if err != nil {
-					log.Errorf("Error writing message to backend %v - %v. Error: %v", m.backendKey, m.backendSessionID, err)
+					log.Errorf("Error writing message to backend %s - %s. Error: %s", logsafe.Value(m.backendKey), logsafe.Value(m.backendSessionID), logsafe.Value(err))
 					m.shutdown()
 					return
 				}

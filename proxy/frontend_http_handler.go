@@ -11,6 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/PastureStack/websocket-proxy/proxy/proxyprotocol"
 )
 
@@ -22,7 +23,7 @@ type FrontendHTTPHandler struct {
 
 func (h *FrontendHTTPHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if err := h.serveHTTP(rw, req); err != nil {
-		log.WithFields(log.Fields{"method": req.Method, "path": req.URL.EscapedPath()}).Error("Failed to handle proxied HTTP request.")
+		log.WithFields(log.Fields{"method": logsafe.Value(req.Method), "path": logsafe.Value(req.URL.EscapedPath())}).Error("Failed to handle proxied HTTP request.")
 		http.Error(rw, "Internal server error", http.StatusInternalServerError)
 	}
 }
@@ -50,7 +51,7 @@ func (h *FrontendHTTPHandler) serveHTTP(rw http.ResponseWriter, req *http.Reques
 
 	reader, writer, err := NewHTTPPipe(rw, h.backend, hostKey)
 	if err != nil {
-		log.Errorf("Failed to construct pipe to backend %s: %v", hostKey, err)
+		log.Errorf("Failed to construct pipe to backend %s: %s", logsafe.Value(hostKey), logsafe.Value(err))
 		return err
 	}
 	defer writer.Close()
@@ -61,7 +62,7 @@ func (h *FrontendHTTPHandler) serveHTTP(rw http.ResponseWriter, req *http.Reques
 	hijack := h.shouldHijack(req)
 
 	if err := writer.WriteRequest(req, hijack, address, scheme); err != nil {
-		log.Errorf("Failed to write request to backend: %v", err)
+		log.Errorf("Failed to write request to backend: %s", logsafe.Value(err))
 		return err
 	}
 
@@ -76,7 +77,7 @@ func (h *FrontendHTTPHandler) serveHTTP(rw http.ResponseWriter, req *http.Reques
 
 		httpConn, buf, err := hijacker.Hijack()
 		if err != nil {
-			log.Errorf("Failed to hijack connection: %v", err)
+			log.Errorf("Failed to hijack connection: %s", logsafe.Value(err))
 			return err
 		}
 		defer httpConn.Close()

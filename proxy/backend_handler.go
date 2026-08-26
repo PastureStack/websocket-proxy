@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 )
@@ -26,7 +27,7 @@ func (h *BackendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	ws, err := upgrader.Upgrade(rw, req, nil)
 	if err != nil {
-		log.Errorf("Error during upgrade for host [%v]: [%v]", hostKey, err)
+		log.Errorf("Error during upgrade for host [%s]: [%s]", logsafe.Value(hostKey), logsafe.Value(err))
 		http.Error(rw, "Failed to upgrade connection.", 500)
 		return
 	}
@@ -37,7 +38,7 @@ func (h *BackendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 func (h *BackendHandler) auth(req *http.Request) (string, bool) {
 	token, tokenParam, err := parseToken(req, h.parsedPublicKey)
 	if err != nil {
-		log.Warnf("Error parsing backend token: %v. Failing auth. Token parameter: %v", err, redactSecretForLog(tokenParam))
+		log.Warnf("Error parsing backend token: %s. Failing auth. Token parameter: %s", logsafe.Value(err), logsafe.Value(redactSecretForLog(tokenParam)))
 		return "", false
 	}
 	if token == nil || !token.Valid {
@@ -47,13 +48,13 @@ func (h *BackendHandler) auth(req *http.Request) (string, bool) {
 
 	reportedUUID, found := claimValue(token, "reportedUuid")
 	if !found {
-		log.Warnf("Token did not have a reportedUuid. Failing auth. Token parameter: %v", redactSecretForLog(tokenParam))
+		log.Warnf("Token did not have a reportedUuid. Failing auth. Token parameter: %s", logsafe.Value(redactSecretForLog(tokenParam)))
 		return "", false
 	}
 
 	hostKey, ok := reportedUUID.(string)
 	if !ok || hostKey == "" {
-		log.Warnf("Backend token host identifier was invalid. Token parameter: %v", redactSecretForLog(tokenParam))
+		log.Warnf("Backend token host identifier was invalid. Token parameter: %s", logsafe.Value(redactSecretForLog(tokenParam)))
 		return "", false
 	}
 

@@ -12,6 +12,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 )
 
 const wsProto string = "Sec-Websocket-Protocol"
@@ -25,7 +26,7 @@ type FrontendHandler struct {
 func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	_, hostKey, authErr := h.auth(req)
 	if authErr != nil {
-		log.Infof("Frontend auth failed: %v", authErr)
+		log.Infof("Frontend auth failed: %s", logsafe.Value(authErr))
 		http.Error(rw, "Failed authentication", 401)
 		return
 	}
@@ -40,7 +41,7 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 	ws, err := upgrader.Upgrade(rw, req, respHeaders)
 	if err != nil {
-		log.Errorf("Error during upgrade: [%v]", err)
+		log.Errorf("Error during upgrade: [%s]", logsafe.Value(err))
 		http.Error(rw, "Failed to upgrade connection.", 500)
 		return
 	}
@@ -49,7 +50,7 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	msgKey, respChannel, err := h.backend.initializeClient(hostKey)
 	if err != nil {
-		log.Errorf("Error during initialization: [%v]", err)
+		log.Errorf("Error during initialization: [%s]", logsafe.Value(err))
 		closeConnection(ws)
 		return
 	}
@@ -72,7 +73,7 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 					msgType = 2
 					data, e = base64.StdEncoding.DecodeString(message.Body)
 					if e != nil {
-						log.Errorf("Error decoding message: %v", e)
+						log.Errorf("Error decoding message: %s", logsafe.Value(e))
 						closeConnection(ws)
 						continue
 					}
