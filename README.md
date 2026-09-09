@@ -8,7 +8,8 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 
 ## Project status
 
-The reviewed source produces the numeric-version candidate `v0.23.13`. It uses
+The current reviewed release is `v0.23.13`, consumed by PastureStack Server
+`v1.6.410`. It uses
 Go 1.27.0 and Docker CLI 29.7.2, a digest-locked Ubuntu 26.04 build image, a
 dated Ubuntu snapshot, Go module checksums, an offline vendored dependency
 set, and checksum-verified toolchain archives. Product-owned imports, configuration fields, proxy
@@ -46,10 +47,10 @@ make build
 make package
 ```
 
-Set `VERSION_OVERRIDE=v0.23.13` for this reviewed candidate. Packaging rejects
-brand or maintenance suffixes and produces the deterministic,
-versioned `websocket-proxy-0.23.13-linux-amd64.tar.xz` asset. Creating a Git
-tag, Release, or published package remains a separate explicit decision.
+Set `VERSION_OVERRIDE=v0.23.13` to reproduce this reviewed release. Packaging
+rejects brand or maintenance suffixes and produces the deterministic,
+versioned `websocket-proxy-0.23.13-linux-amd64.tar.xz` asset. Publishing a
+future version remains a separate explicit decision.
 
 See [COMPATIBILITY.md](COMPATIBILITY.md), [SECURITY.md](SECURITY.md), and [ORIGIN.md](ORIGIN.md).
 
