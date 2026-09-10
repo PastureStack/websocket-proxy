@@ -5,6 +5,9 @@ The migration preserves existing `/v1`, `/v2-beta`, and `/v2` proxy paths, backe
 Preferred settings use `platform-*`, `PLATFORM_*`, and
 `PROXY_PLATFORM_ADDRESS`. Historical `cattle-*`, `CATTLE_*`, and
 `PROXY_CATTLE_ADDRESS` aliases remain only as runtime configuration contracts.
+`PROXY_PLATFORM_PUBLIC_ORIGIN` is an optional deployment contract for a
+canonical public HTTP(S) origin when TLS terminates before an internal HTTP
+hop; requests for any other host keep listener-derived forwarding values.
 The generated legacy API client is no longer shipped. Its required certificate
 discovery behavior is implemented against the compatible schema and credential
 links with authenticated same-origin requests.

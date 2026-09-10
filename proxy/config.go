@@ -38,6 +38,7 @@ type Config struct {
 	ParentPid                int
 	ProxyProtoHTTPSPorts     map[int]bool
 	TrustedProxyCIDRs        []*net.IPNet
+	PlatformPublicOrigin     *url.URL
 	PlatformAccessKey        string
 	PlatformSecretKey        string
 	TLSListenAddr            string
@@ -55,6 +56,7 @@ func GetConfig() (*Config, error) {
 	var keyContents string
 	var proxyProtoHTTPSPorts string
 	var trustedProxyCIDRs string
+	var platformPublicOrigin string
 	var apiInterceptorConfigFile string
 	var legacyPlatformAddr string
 
@@ -73,6 +75,7 @@ func GetConfig() (*Config, error) {
 	flag.IntVar(&c.ParentPid, "parent-pid", 0, "If provided, this process will exit when the specified parent process stops running.")
 	flag.StringVar(&proxyProtoHTTPSPorts, "https-proxy-protocol-ports", "", "If proxy protocol is used, a list of proxy ports that will allow us to recognize that the connection was over https.")
 	flag.StringVar(&trustedProxyCIDRs, "trusted-proxy-cidrs", "127.0.0.0/8,::1/128", "Comma-separated source CIDRs allowed to send Proxy Protocol headers.")
+	flag.StringVar(&platformPublicOrigin, "platform-public-origin", "", "Optional canonical public http(s) origin used when this proxy runs behind TLS termination.")
 	flag.StringVar(&apiInterceptorConfigFile, "api-interceptor-config-file", "", "Location of the config.json that defines the API interceptors.")
 
 	if !flag.Parsed() {
@@ -124,9 +127,30 @@ func GetConfig() (*Config, error) {
 	if parseErr != nil {
 		return nil, parseErr
 	}
+	c.PlatformPublicOrigin, parseErr = parsePlatformPublicOrigin(platformPublicOrigin)
+	if parseErr != nil {
+		return nil, parseErr
+	}
 	c.APIInterceptorConfigFile = apiInterceptorConfigFile
 
 	return c, nil
+}
+
+func parsePlatformPublicOrigin(raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return nil, errors.New("platform public origin must be an absolute http(s) origin")
+	}
+	if parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("platform public origin must not contain credentials, a path, a query, or a fragment")
+	}
+	parsed.Path = ""
+	return parsed, nil
 }
 
 func parseTrustedProxyCIDRs(raw string) ([]*net.IPNet, error) {

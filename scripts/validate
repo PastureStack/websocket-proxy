@@ -30,7 +30,7 @@ if [ "${#maintained_go_files[@]}" -gt 0 ]; then
 fi
 
 echo Running: version and dependency policy
-test "$(VERSION_OVERRIDE=v0.23.13 bash -c 'source scripts/version; printf %s "$VERSION"')" = "0.23.13"
+test "$(VERSION_OVERRIDE=v0.23.14 bash -c 'source scripts/version; printf %s "$VERSION"')" = "0.23.14"
 if VERSION_OVERRIDE=v0.23.12-maintenance.1 bash -c 'source scripts/version' >/dev/null 2>&1; then
     echo "non-numeric version suffix was accepted" >&2
     exit 1
@@ -55,6 +55,8 @@ grep -F 'stripProxyAuthenticationQuery(req)' proxy/frontend_http_handler.go >/de
 grep -F 'stripProxyAuthenticationCookies(req)' proxy/frontend_http_handler.go >/dev/null
 grep -F 'req.Header.Set(xForwardedFor, requestClientIP(req))' proxy/proxyprotocol/http_integration.go >/dev/null
 grep -F '"trusted-proxy-cidrs", "127.0.0.0/8,::1/128"' proxy/config.go >/dev/null
+grep -F '"platform-public-origin"' proxy/config.go >/dev/null
+grep -F 'publicOriginMatchesRequest(req, publicOrigin)' proxy/proxyprotocol/http_integration.go >/dev/null
 grep -F 'MaxWireMessageBytes' common/common.go >/dev/null
 if grep -R -E 'CheckOrigin:[[:space:]]*func\([^)]*\)[[:space:]]*bool[[:space:]]*\{[[:space:]]*return[[:space:]]+true' \
     --include='*.go' --exclude='*_test.go' --exclude=validate proxy backend common; then

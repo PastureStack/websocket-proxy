@@ -8,8 +8,8 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 
 ## Project status
 
-The current reviewed release is `v0.23.13`, consumed by PastureStack Server
-`v1.6.410`. It uses
+The current reviewed release is `v0.23.14`, consumed by PastureStack Server
+`v1.6.411`. It uses
 Go 1.27.0 and Docker CLI 29.7.2, a digest-locked Ubuntu 26.04 build image, a
 dated Ubuntu snapshot, Go module checksums, an offline vendored dependency
 set, and checksum-verified toolchain archives. Product-owned imports, configuration fields, proxy
@@ -29,6 +29,12 @@ or newer. Current dependency provenance is locked by `go.mod`, `go.sum`, and
 
 Use `--platform-address`, `PLATFORM_ACCESS_KEY`, and `PLATFORM_SECRET_KEY`. Historical `--cattle-address`, `PROXY_CATTLE_ADDRESS`, and `CATTLE_*` settings remain compatibility fallbacks. Set `PASTURESTACK_LOCALE=en-US` or `zh-TW` for operator messages.
 
+When TLS terminates in front of the Server container, set
+`PROXY_PLATFORM_PUBLIC_ORIGIN` to the exact public origin, for example
+`https://stack.example.com`. The proxy uses it only when the request host
+matches that configured authority, so internal HTTP hops retain public HTTPS
+links without trusting browser-supplied forwarding headers.
+
 The persistent console broker uses
 `/v1/exec/sessions/{sessionId}`. Session creation and deletion require a
 same-origin request; WebSocket attachment authenticates with the
@@ -47,9 +53,9 @@ make build
 make package
 ```
 
-Set `VERSION_OVERRIDE=v0.23.13` to reproduce this reviewed release. Packaging
+Set `VERSION_OVERRIDE=v0.23.14` to reproduce this reviewed release. Packaging
 rejects brand or maintenance suffixes and produces the deterministic,
-versioned `websocket-proxy-0.23.13-linux-amd64.tar.xz` asset. Publishing a
+versioned `websocket-proxy-0.23.14-linux-amd64.tar.xz` asset. Publishing a
 future version remains a separate explicit decision.
 
 See [COMPATIBILITY.md](COMPATIBILITY.md), [SECURITY.md](SECURITY.md), and [ORIGIN.md](ORIGIN.md).

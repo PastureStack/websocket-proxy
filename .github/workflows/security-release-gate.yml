@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      VERSION_OVERRIDE: v0.23.13
+      VERSION_OVERRIDE: v0.23.14
       SOURCE_DATE_EPOCH: "0"
       TRIVY_IMAGE: aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
       BUILDER_IMAGE: pasturestack-websocket-proxy-dapper:ubuntu26
@@ -30,7 +30,7 @@ jobs:
           set -o pipefail
           make ci 2>&1 | tee evidence/build-test.log
           cp bin/websocket-proxy evidence/websocket-proxy-linux-amd64
-          cp dist/artifacts/websocket-proxy-0.23.13-linux-amd64.tar.xz evidence/first-build.tar.xz
+          cp dist/artifacts/websocket-proxy-0.23.14-linux-amd64.tar.xz evidence/first-build.tar.xz
 
       - name: Verify a byte-identical second package
         id: reproduce
@@ -38,7 +38,7 @@ jobs:
           set -o pipefail
           rm -rf bin dist
           make package 2>&1 | tee evidence/reproducible-build.log
-          cp dist/artifacts/websocket-proxy-0.23.13-linux-amd64.tar.xz evidence/second-build.tar.xz
+          cp dist/artifacts/websocket-proxy-0.23.14-linux-amd64.tar.xz evidence/second-build.tar.xz
           cmp evidence/first-build.tar.xz evidence/second-build.tar.xz
           sha256sum evidence/first-build.tar.xz evidence/second-build.tar.xz \
             | tee evidence/package-sha256.txt

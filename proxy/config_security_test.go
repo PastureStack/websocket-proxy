@@ -162,6 +162,23 @@ func TestParseTrustedProxyCIDRs(t *testing.T) {
 	}
 }
 
+func TestParsePlatformPublicOrigin(t *testing.T) {
+	origin, err := parsePlatformPublicOrigin("https://stack.example.test/")
+	if err != nil || origin.String() != "https://stack.example.test" {
+		t.Fatalf("valid public origin was rejected: origin=%v err=%v", origin, err)
+	}
+	for _, invalid := range []string{
+		"ftp://stack.example.test",
+		"https://user:secret@stack.example.test",
+		"https://stack.example.test/a/path",
+		"https://stack.example.test?query=value",
+	} {
+		if _, err := parsePlatformPublicOrigin(invalid); err == nil {
+			t.Fatalf("invalid public origin was accepted: %q", invalid)
+		}
+	}
+}
+
 func TestExtractCertificateArchiveRejectsMissingAndDuplicateEntries(t *testing.T) {
 	_, err := extractCertificateArchive(certificateArchive(t, map[string]string{
 		"ca.pem":   "ca",
