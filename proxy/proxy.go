@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"regexp"
 	"sync"
@@ -70,8 +71,9 @@ func (s *Starter) StartProxy() error {
 			backend:         bpm,
 			parsedPublicKey: s.Config.PublicKey,
 		},
-		HTTPSPorts:  s.Config.ProxyProtoHTTPSPorts,
-		TokenLookup: tokenLookup,
+		HTTPSPorts:   s.Config.ProxyProtoHTTPSPorts,
+		PublicOrigin: s.Config.PlatformPublicOrigin,
+		TokenLookup:  tokenLookup,
 	})
 
 	platformProxy, platformWsProxy, err := newPlatformProxies(s.Config)
@@ -247,8 +249,9 @@ func newWSProxy(config *Config) (http.Handler, error) {
 	}
 
 	reverseProxy := &proxyProtocolConverter{
-		p:          platformProxy,
-		httpsPorts: config.ProxyProtoHTTPSPorts,
+		p:            platformProxy,
+		httpsPorts:   config.ProxyProtoHTTPSPorts,
+		publicOrigin: config.PlatformPublicOrigin,
 	}
 
 	wsProxy := &platformWSProxy{
@@ -268,8 +271,9 @@ func newPlatformProxies(config *Config) (*proxyProtocolConverter, *platformWSPro
 	}
 
 	reverseProxy := &proxyProtocolConverter{
-		httpsPorts: config.ProxyProtoHTTPSPorts,
-		p:          apiProxyHandler,
+		httpsPorts:   config.ProxyProtoHTTPSPorts,
+		publicOrigin: config.PlatformPublicOrigin,
+		p:            apiProxyHandler,
 	}
 
 	wsProxy := &platformWSProxy{
@@ -281,12 +285,13 @@ func newPlatformProxies(config *Config) (*proxyProtocolConverter, *platformWSPro
 }
 
 type proxyProtocolConverter struct {
-	httpsPorts map[int]bool
-	p          http.Handler
+	httpsPorts   map[int]bool
+	publicOrigin *url.URL
+	p            http.Handler
 }
 
 func (h *proxyProtocolConverter) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	proxyprotocol.AddHeaders(req, h.httpsPorts)
+	proxyprotocol.AddHeaders(req, h.httpsPorts, h.publicOrigin)
 	h.p.ServeHTTP(rw, req)
 }
 
@@ -301,7 +306,7 @@ func (h *platformWSProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			http.Error(rw, "Cross-origin websocket request denied", http.StatusForbidden)
 			return
 		}
-		proxyprotocol.AddHeaders(req, h.reverseProxy.httpsPorts)
+		proxyprotocol.AddHeaders(req, h.reverseProxy.httpsPorts, h.reverseProxy.publicOrigin)
 		h.serveWebsocket(rw, req)
 	} else {
 		h.reverseProxy.ServeHTTP(rw, req)

@@ -17,8 +17,9 @@ import (
 
 type FrontendHTTPHandler struct {
 	FrontendHandler
-	HTTPSPorts  map[int]bool
-	TokenLookup *TokenLookup
+	HTTPSPorts   map[int]bool
+	PublicOrigin *url.URL
+	TokenLookup  *TokenLookup
 }
 
 func (h *FrontendHTTPHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -46,7 +47,7 @@ func (h *FrontendHTTPHandler) serveHTTP(rw http.ResponseWriter, req *http.Reques
 	scheme, _ := data["scheme"].(string)
 	stripProxyAuthenticationQuery(req)
 
-	proxyprotocol.AddHeaders(req, h.HTTPSPorts)
+	proxyprotocol.AddHeaders(req, h.HTTPSPorts, h.PublicOrigin)
 	proxyprotocol.AddForwardedFor(req)
 
 	reader, writer, err := NewHTTPPipe(rw, h.backend, hostKey)

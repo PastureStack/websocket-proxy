@@ -3,6 +3,7 @@ package proxyprotocol
 import (
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -11,9 +12,10 @@ const (
 	xForwardedProto string = "X-Forwarded-Proto"
 	xForwardedPort  string = "X-Forwarded-Port"
 	xForwardedFor   string = "X-Forwarded-For"
+	xForwardedHost  string = "X-Forwarded-Host"
 )
 
-func AddHeaders(req *http.Request, httpsPorts map[int]bool) {
+func AddHeaders(req *http.Request, httpsPorts map[int]bool, publicOrigin *url.URL) {
 	proxyProtoInfo := getInfo(req.RemoteAddr)
 	if proxyProtoInfo != nil {
 		proto := "http"
@@ -32,6 +34,53 @@ func AddHeaders(req *http.Request, httpsPorts map[int]bool) {
 		req.Header.Del(xForwardedPort)
 		req.Header.Set(xForwardedFor, requestClientIP(req))
 	}
+
+	// A configured origin is explicit deployment authority, not a forwarded
+	// client claim. Apply it only to requests for that same public host; all
+	// other hosts retain transport-derived values above.
+	if publicOriginMatchesRequest(req, publicOrigin) {
+		req.Header.Set(xForwardedProto, publicOrigin.Scheme)
+		req.Header.Set(xForwardedHost, publicOrigin.Host)
+		port := publicOrigin.Port()
+		if port == "" {
+			if publicOrigin.Scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		req.Header.Set(xForwardedPort, port)
+	} else {
+		req.Header.Set(xForwardedHost, req.Host)
+	}
+}
+
+func publicOriginMatchesRequest(req *http.Request, origin *url.URL) bool {
+	if origin == nil || req == nil || req.Host == "" {
+		return false
+	}
+
+	requestAuthority, err := url.Parse("//" + req.Host)
+	if err != nil || requestAuthority.User != nil || requestAuthority.Hostname() == "" {
+		return false
+	}
+	if !strings.EqualFold(requestAuthority.Hostname(), origin.Hostname()) {
+		return false
+	}
+
+	defaultPort := "80"
+	if origin.Scheme == "https" {
+		defaultPort = "443"
+	}
+	requestPort := requestAuthority.Port()
+	if requestPort == "" {
+		requestPort = defaultPort
+	}
+	originPort := origin.Port()
+	if originPort == "" {
+		originPort = defaultPort
+	}
+	return requestPort == originPort
 }
 
 func AddForwardedFor(req *http.Request) {

@@ -34,6 +34,9 @@ support commitment and is not published or deployed automatically.
   interceptor requests.
 - Client-supplied forwarding headers are replaced with the connection identity
   established by the listener; they are never trusted as authoritative input.
+- A configured public origin may restore the external scheme and port after an
+  internal HTTP hop, but only for requests whose host matches that exact
+  administrator-configured authority.
 - Proxy Protocol is accepted from loopback sources by default. Deployments
   using a remote load balancer must explicitly configure its source networks
   with `--trusted-proxy-cidrs` (or `PROXY_TRUSTED_PROXY_CIDRS`).
