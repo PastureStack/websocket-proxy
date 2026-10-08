@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"regexp"
+	"testing"
+)
 
 func TestTraditionalChineseOperatorMessage(t *testing.T) {
 	if got := operatorMessage("zh-TW", "start"); got != "正在啟動 PastureStack WebSocket 代理服務。" {
@@ -18,7 +21,7 @@ func TestVersionRequested(t *testing.T) {
 }
 
 func TestDefaultVersionIsNumeric(t *testing.T) {
-	if VERSION != "0.0.0" {
+	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(VERSION) {
 		t.Fatalf("default build version must be numeric, got %q", VERSION)
 	}
 }

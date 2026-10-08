@@ -33,3 +33,21 @@ func TestFailureReporterRejectsRedirectAndUnconfirmedOrOversizedResponse(t *test
 		t.Fatal("untrusted or missing proof accepted")
 	}
 }
+
+func TestRouteFailureReporterRequiresProxyAttemptUuidBeforeAnyNetworkCall(t *testing.T) {
+	calls := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"accepted":true}`))
+	}))
+	defer server.Close()
+	reporter := NewFailureReporter(server.URL)
+	for _, attempt := range []string{"", "client-selected", "00000000-0000-0000-0000-000000000000", "00000000-0000-4000-8000-000000000000\n"} {
+		if reporter.ReportRouteDenied("grant", "proof", attempt) || calls.Load() != 0 {
+			t.Fatal("malformed route nonce reached the audit endpoint")
+		}
+	}
+	if !reporter.ReportRouteDenied("grant", "proof", "00000000-0000-4000-8000-000000000000") || calls.Load() != 1 {
+		t.Fatal("valid fixed route evidence was not bounded to one request")
+	}
+}

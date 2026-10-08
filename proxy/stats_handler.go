@@ -66,6 +66,10 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	tokenString, authToken, err := h.auth(req)
 	if err != nil {
+		if errors.Is(err, errDelegationRouteDenied) {
+			writeRouteDenial(rw, h.failures, h.backend, err)
+			return
+		}
 		http.Error(rw, "Failed authentication", 401)
 		return
 	}
@@ -94,6 +98,16 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	statsInfoStructs, err := h.parseStatsInfo(req, tokenString, multiHost)
 	if err != nil {
 		log.Error("Failed to read statistics targets")
+		if errors.Is(err, errDelegationRouteDenied) {
+			status, code := reportRouteDenial(h.failures, h.backend, err)
+			closeCode := websocket.ClosePolicyViolation
+			if status == http.StatusServiceUnavailable {
+				closeCode = websocket.CloseTryAgainLater
+			}
+			_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(closeCode, code), time.Now().Add(time.Second))
+			closeConnection(ws)
+			return
+		}
 		if errors.Is(err, errBackendAuditCapability) {
 			closeForBackendOutcome(ws, reportCapabilityError(h.failures, h.backend, err)+":503")
 			closeConnection(ws)
@@ -201,7 +215,10 @@ func (h *StatsHandler) auth(req *http.Request) (string, *jwt.Token, error) {
 	if err != nil {
 		return "", nil, delegation.ErrDenied
 	}
-	if grant != nil && (!grant.AllowsPath(req.URL.Path) || h.delegations.Check(req.Context(), tokenString, grant) != nil) {
+	if err := checkStreamRoute(token, grant, req.URL.Path, h.parsedPublicKey); err != nil {
+		return "", nil, err
+	}
+	if grant != nil && h.delegations.Check(req.Context(), tokenString, grant) != nil {
 		return "", nil, delegation.ErrDenied
 	}
 
@@ -221,7 +238,10 @@ func (h *StatsHandler) parseStatsInfo(req *http.Request, tokenString string, mul
 	if err != nil {
 		return nil, delegation.ErrDenied
 	}
-	if grant != nil && (!grant.AllowsPath(req.URL.Path) || h.delegations.Check(req.Context(), tokenString, grant) != nil) {
+	if err := checkStreamRoute(token, grant, req.URL.Path, h.parsedPublicKey); err != nil {
+		return nil, err
+	}
+	if grant != nil && h.delegations.Check(req.Context(), tokenString, grant) != nil {
 		return nil, delegation.ErrDenied
 	}
 	originalToken := token
@@ -282,7 +302,10 @@ func (h *StatsHandler) parseStatsInfo(req *http.Request, tokenString string, mul
 			}
 			if innerGrant != nil {
 				parsedURL, _ := url.Parse(targetURL)
-				if !innerGrant.AllowsPath(parsedURL.Path) || h.delegations.Check(context.Background(), innerTokenString, innerGrant) != nil {
+				if err := checkStreamRoute(innerJwtToken, innerGrant, parsedURL.Path, h.parsedPublicKey); err != nil {
+					return nil, err
+				}
+				if h.delegations.Check(context.Background(), innerTokenString, innerGrant) != nil {
 					return nil, delegation.ErrDenied
 				}
 			}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"time"
 )
 
@@ -29,10 +30,28 @@ func NewFailureReporter(engine string) *FailureReporter {
 }
 
 func (reporter *FailureReporter) Report(token, backendToken string) bool {
+	return reporter.report(token, backendToken, "")
+}
+
+// ReportRouteDenied has one fixed meaning. A caller cannot choose an outcome,
+// failure reason, Key identity, or target; Engine derives them from both tickets.
+func (reporter *FailureReporter) ReportRouteDenied(token, backendToken, attemptID string) bool {
+	if !regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`).MatchString(attemptID) {
+		return false
+	}
+	return reporter.report(token, backendToken, attemptID)
+}
+
+func (reporter *FailureReporter) report(token, backendToken, attemptID string) bool {
 	if reporter == nil || reporter.Endpoint == "" || reporter.Client == nil || token == "" || backendToken == "" || len(token) > MaxTokenBytes || len(backendToken) > MaxTokenBytes {
 		return false
 	}
-	body, _ := json.Marshal(map[string]string{"token": token, "backendToken": backendToken})
+	proof := map[string]string{"token": token, "backendToken": backendToken}
+	if attemptID != "" {
+		proof["failureCode"] = "DelegationRouteDenied"
+		proof["attemptId"] = attemptID
+	}
+	body, _ := json.Marshal(proof)
 	// A client disconnect must not cancel an already observed server denial.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

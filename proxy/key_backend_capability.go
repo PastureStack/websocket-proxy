@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/PastureStack/websocket-proxy/common"
 	"github.com/PastureStack/websocket-proxy/delegation"
@@ -12,8 +15,112 @@ import (
 
 const backendAuditCapabilityCode = "BackendAuditCapabilityUnavailable"
 const streamErrorCodeHeader = "X-PastureStack-Stream-Error-Code"
+const delegationRouteDeniedCode = "DelegationRouteDenied"
 
 var errBackendAuditCapability = errors.New(backendAuditCapabilityCode)
+var errDelegationRouteDenied = errors.New(delegationRouteDeniedCode)
+
+type routeDenialTarget struct{ token, host string }
+type routeDenialFailure struct {
+	targets   []routeDenialTarget
+	attemptID string
+}
+
+func (*routeDenialFailure) Error() string { return delegationRouteDeniedCode }
+func (*routeDenialFailure) Unwrap() error { return errDelegationRouteDenied }
+
+// Call only after signature validation and Grant parsing. This records a fixed
+// operational denial; it never turns either ticket into general authorization.
+func checkStreamRoute(token *jwt.Token, grant *delegation.Grant, path string, publicKey interface{}) error {
+	if grant == nil || grant.AllowsPath(path) {
+		return nil
+	}
+	// One nonce belongs to this observed HTTP attempt, never a browser value.
+	// It remains attached to this failure for every per-Host receipt.
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return &routeDenialFailure{}
+	}
+	nonce[6], nonce[8] = (nonce[6]&0x0f)|0x40, (nonce[8]&0x3f)|0x80
+	encoded := hex.EncodeToString(nonce)
+	attemptID := encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:]
+	host, _ := grant.Payload["hostUuid"].(string)
+	if host != "" {
+		return &routeDenialFailure{targets: []routeDenialTarget{{token.Raw, host}}, attemptID: attemptID}
+	}
+	// An aggregate has no single Host identity. Validate every inner signature
+	// and binding before sending any receipt. URLs and browser inputs supply no
+	// identity; only the original signed outer payload may supply inner tickets.
+	failed := &routeDenialFailure{}
+	if grant.Operation != "read" || len(grant.Payload) != 1 {
+		return failed
+	}
+	raw, present := grant.Payload["project"]
+	if !present {
+		raw = grant.Payload["service"]
+	}
+	entries, ok := raw.([]interface{})
+	if !ok || len(entries) == 0 || len(entries) > maxStatsTargets {
+		return failed
+	}
+	seen := map[string]bool{}
+	targets := []routeDenialTarget{}
+	for _, entry := range entries {
+		data, ok := entry.(map[string]interface{})
+		if !ok {
+			return failed
+		}
+		rawToken, ok := data["token"].(string)
+		if !ok {
+			return failed
+		}
+		innerToken, err := parseRequestToken(rawToken, publicKey)
+		if err != nil || !innerToken.Valid {
+			return failed
+		}
+		inner, err := streamGrant(innerToken)
+		if err != nil || inner == nil || inner.KeyID != grant.KeyID || inner.Revision != grant.Revision ||
+			inner.TargetType != grant.TargetType || inner.TargetID != grant.TargetID || inner.Operation != grant.Operation {
+			return failed
+		}
+		innerHost, ok := inner.Payload["hostUuid"].(string)
+		if !ok || innerHost == "" {
+			return failed
+		}
+		if !seen[innerHost] {
+			targets = append(targets, routeDenialTarget{rawToken, innerHost})
+			seen[innerHost] = true
+		}
+	}
+	failed.targets = targets
+	failed.attemptID = attemptID
+	return failed
+}
+
+func reportRouteDenial(reporter *delegation.FailureReporter, backend backendProxy, err error) (int, string) {
+	var failure *routeDenialFailure
+	proof, ok := backend.(backendTicketSource)
+	if !errors.As(err, &failure) || !ok || len(failure.targets) == 0 || len(failure.targets) > maxStatsTargets {
+		return http.StatusServiceUnavailable, "AuditUnavailable"
+	}
+	// Receipt failure never retries a Docker action. Bound the entire aggregate
+	// attempt as well as each existing two-second HTTP request.
+	deadline := time.Now().Add(5 * time.Second)
+	for _, target := range failure.targets {
+		if time.Now().After(deadline) || !reporter.ReportRouteDenied(target.token, proof.backendTicket(target.host), failure.attemptID) {
+			return http.StatusServiceUnavailable, "AuditUnavailable"
+		}
+	}
+	return http.StatusForbidden, delegationRouteDeniedCode
+}
+
+func writeRouteDenial(rw http.ResponseWriter, reporter *delegation.FailureReporter, backend backendProxy, err error) {
+	status, code := reportRouteDenial(reporter, backend, err)
+	rw.Header().Set(streamErrorCodeHeader, code)
+	rw.Header().Set("X-Api-Error-Code", code)
+	rw.Header().Set("Cache-Control", "no-store")
+	http.Error(rw, code, status)
+}
 
 type keyTraceBackend interface{ supportsKeyTraces(string) bool }
 type backendTicketSource interface{ backendTicket(string) string }
