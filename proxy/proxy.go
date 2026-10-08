@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PastureStack/websocket-proxy/delegation"
 	"github.com/PastureStack/websocket-proxy/k8s"
 	"github.com/PastureStack/websocket-proxy/proxy/apiinterceptor"
 	"github.com/PastureStack/websocket-proxy/proxy/proxyprotocol"
@@ -52,6 +53,7 @@ func (s *Starter) StartProxy() error {
 	frontendBaseHandler := &FrontendHandler{
 		backend:         bpm,
 		parsedPublicKey: s.Config.PublicKey,
+		delegations:     delegation.New("http://" + s.Config.PlatformAddr),
 	}
 	frontendHandler := switcher.Wrap(frontendBaseHandler)
 	persistentSessionHandler := switcher.Wrap(NewPersistentSessionHandler(frontendBaseHandler, bpm))
@@ -59,6 +61,7 @@ func (s *Starter) StartProxy() error {
 	statsHandler := switcher.Wrap(&StatsHandler{
 		backend:         bpm,
 		parsedPublicKey: s.Config.PublicKey,
+		delegations:     frontendBaseHandler.delegations,
 	})
 
 	backendHandler := switcher.Wrap(&BackendHandler{

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/delegation"
 	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -80,18 +82,21 @@ type persistentSession struct {
 	secretHash [sha256.Size]byte
 	backend    backendProxy
 
-	mu             sync.Mutex
-	status         string
-	controller     string
-	createdAt      time.Time
-	lastActivity   time.Time
-	endedAt        time.Time
-	closeOnce      sync.Once
-	nextSequence   uint64
-	replayBytes    int
-	maxReplayBytes int
-	replay         []workspaceReplayEntry
-	clients        map[string]*workspaceClient
+	mu                sync.Mutex
+	status            string
+	controller        string
+	createdAt         time.Time
+	lastActivity      time.Time
+	endedAt           time.Time
+	closeOnce         sync.Once
+	nextSequence      uint64
+	replayBytes       int
+	maxReplayBytes    int
+	replay            []workspaceReplayEntry
+	clients           map[string]*workspaceClient
+	delegationCheck   func() bool
+	delegationStop    context.CancelFunc
+	delegationRevoked bool
 }
 
 type workspaceClient struct {
@@ -237,14 +242,20 @@ func (h *PersistentSessionHandler) createSession(rw http.ResponseWriter, req *ht
 	authRequest.Header.Set("Authorization", "Bearer "+input.Token)
 	authURL := *req.URL
 	authURL.RawQuery = ""
+	actualTarget, _ := url.Parse(targetURL)
+	authURL.Path = actualTarget.Path
 	authRequest.URL = &authURL
-	_, hostKey, err := h.frontend.auth(authRequest)
+	token, hostKey, err := h.frontend.auth(authRequest)
 	if err != nil {
 		writeWorkspaceJSONError(rw, http.StatusUnauthorized, "authentication_failed", "Workspace session authentication failed")
 		return
 	}
 
-	session, created, err := h.manager.create(sessionID, input.Kind, secretHash, hostKey, targetURL)
+	var bind func(*persistentSession)
+	if grant, parseErr := streamGrant(token); parseErr == nil && grant != nil {
+		bind = func(session *persistentSession) { session.bindDelegation(h.frontend.delegations, input.Token, grant) }
+	}
+	session, created, err := h.manager.createWithAuthorization(sessionID, input.Kind, secretHash, hostKey, targetURL, bind)
 	if err != nil {
 		switch err {
 		case errWorkspaceSessionConflict:
@@ -344,6 +355,10 @@ func (m *persistentSessionManager) get(id string) *persistentSession {
 }
 
 func (m *persistentSessionManager) create(id, kind string, secretHash [sha256.Size]byte, hostKey, targetURL string) (*persistentSession, bool, error) {
+	return m.createWithAuthorization(id, kind, secretHash, hostKey, targetURL, nil)
+}
+
+func (m *persistentSessionManager) createWithAuthorization(id, kind string, secretHash [sha256.Size]byte, hostKey, targetURL string, bind func(*persistentSession)) (*persistentSession, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -376,6 +391,9 @@ func (m *persistentSessionManager) create(id, kind string, secretHash [sha256.Si
 		maxReplayBytes: m.maxReplayBytes,
 		replay:         make([]workspaceReplayEntry, 0),
 		clients:        make(map[string]*workspaceClient),
+	}
+	if bind != nil {
+		bind(session)
 	}
 	m.sessions[id] = session
 
@@ -447,7 +465,48 @@ func (m *persistentSessionManager) cleanup(now time.Time) {
 }
 
 func (s *persistentSession) matchesSecretHash(candidate [sha256.Size]byte) bool {
-	return subtle.ConstantTimeCompare(candidate[:], s.secretHash[:]) == 1
+	if subtle.ConstantTimeCompare(candidate[:], s.secretHash[:]) != 1 {
+		return false
+	}
+	s.mu.Lock()
+	check, revoked := s.delegationCheck, s.delegationRevoked
+	s.mu.Unlock()
+	if revoked {
+		return false
+	}
+	if check != nil && !check() {
+		s.revokeDelegation()
+		return false
+	}
+	return true
+}
+
+func (s *persistentSession) bindDelegation(verifier *delegation.Verifier, raw string, grant *delegation.Grant) {
+	s.mu.Lock()
+	s.delegationCheck = func() bool { return verifier.Check(context.Background(), raw, grant) == nil }
+	s.mu.Unlock()
+	stop := verifier.Watch(context.Background(), raw, grant, s.revokeDelegation)
+	s.mu.Lock()
+	s.delegationStop = stop
+	ended := s.status == "ended" || s.status == "error" || s.delegationRevoked
+	s.mu.Unlock()
+	if ended {
+		stop()
+	}
+}
+
+func (s *persistentSession) revokeDelegation() {
+	s.mu.Lock()
+	s.delegationRevoked = true
+	s.replay = nil
+	s.replayBytes = 0
+	stop := s.delegationStop
+	s.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	s.terminate("authorization-revoked")
+	s.closeClients()
 }
 
 func (s *persistentSession) expired(now time.Time, activeRetention, endedRetention time.Duration) (bool, bool) {
@@ -469,6 +528,17 @@ func (s *persistentSession) pump(responseChannel <-chan common.Message) {
 		case common.Body:
 			s.appendOutput(message.Body)
 		case common.Close:
+			if message.Body == "AuditUnavailable:503" {
+				s.mu.Lock()
+				clients := make([]*workspaceClient, 0, len(s.clients))
+				for _, client := range s.clients {
+					clients = append(clients, client)
+				}
+				s.mu.Unlock()
+				for _, client := range clients {
+					closeForBackendOutcome(client.ws, message.Body)
+				}
+			}
 			return
 		}
 	}
@@ -477,7 +547,7 @@ func (s *persistentSession) pump(responseChannel <-chan common.Message) {
 func (s *persistentSession) appendOutput(data string) {
 	now := time.Now().UTC()
 	s.mu.Lock()
-	if s.status == "ended" || s.status == "error" || s.status == "closing" {
+	if s.status == "ended" || s.status == "error" || s.status == "closing" || s.delegationRevoked {
 		s.mu.Unlock()
 		return
 	}
@@ -507,6 +577,11 @@ func (s *persistentSession) appendOutput(data string) {
 
 func (s *persistentSession) addClient(client *workspaceClient) {
 	s.mu.Lock()
+	if s.delegationRevoked {
+		s.mu.Unlock()
+		client.close()
+		return
+	}
 	if previous := s.clients[client.clientID]; previous != nil {
 		delete(s.clients, client.clientID)
 		previous.close()
@@ -659,7 +734,11 @@ func (s *persistentSession) markEnded() {
 		ControllerID: "",
 		LastActivity: s.lastActivity.Format(time.RFC3339Nano),
 	})
+	stop := s.delegationStop
 	s.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
 }
 
 func (s *persistentSession) closeClients() {

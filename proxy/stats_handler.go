@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/delegation"
 )
 
 const maxStatsTargets = 256
@@ -20,6 +22,7 @@ const maxStatsTargets = 256
 type StatsHandler struct {
 	backend         backendProxy
 	parsedPublicKey interface{}
+	delegations     *delegation.Verifier
 }
 
 type statsInfo struct {
@@ -92,6 +95,20 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Invalid statistics targets"), time.Now().Add(time.Second))
 		return
 	}
+	actualToken, err := parseRequestToken(tokenString, h.parsedPublicKey)
+	if err != nil {
+		closeConnection(ws)
+		return
+	}
+	grant, err := streamGrant(actualToken)
+	if err != nil {
+		closeConnection(ws)
+		return
+	}
+	if grant != nil {
+		cancel := h.delegations.Watch(req.Context(), tokenString, grant, func() { closeConnection(ws) })
+		defer cancel()
+	}
 
 	var mutex sync.Mutex
 	var countMutex sync.Mutex
@@ -130,6 +147,7 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 					}
 					mutex.Unlock()
 				case common.Close:
+					closeForBackendOutcome(ws, message.Body)
 					countMutex.Lock()
 					doneCounter--
 					shouldClose := doneCounter == 0
@@ -164,6 +182,13 @@ func (h *StatsHandler) auth(req *http.Request) (string, *jwt.Token, error) {
 	if !token.Valid {
 		return "", nil, fmt.Errorf("Token not valid")
 	}
+	grant, err := streamGrant(token)
+	if err != nil {
+		return "", nil, delegation.ErrDenied
+	}
+	if grant != nil && (!grant.AllowsPath(req.URL.Path) || h.delegations.Check(req.Context(), tokenString, grant) != nil) {
+		return "", nil, delegation.ErrDenied
+	}
 
 	return tokenString, token, nil
 }
@@ -176,6 +201,24 @@ func (h *StatsHandler) parseStatsInfo(req *http.Request, tokenString string, mul
 
 	if !token.Valid {
 		return nil, fmt.Errorf("Token not valid")
+	}
+	grant, err := streamGrant(token)
+	if err != nil {
+		return nil, delegation.ErrDenied
+	}
+	if grant != nil && (!grant.AllowsPath(req.URL.Path) || h.delegations.Check(req.Context(), tokenString, grant) != nil) {
+		return nil, delegation.ErrDenied
+	}
+	if grant != nil {
+		// Only the already signature/live-verified envelope is exposed to the
+		// existing statistics target parser; the wire JWT stays fail-closed.
+		copyToken := *token
+		claims := jwt.MapClaims{}
+		for key, value := range grant.Payload {
+			claims[key] = value
+		}
+		copyToken.Claims = claims
+		token = &copyToken
 	}
 
 	var statsInfoStructs []*statsInfo
@@ -210,6 +253,16 @@ func (h *StatsHandler) parseStatsInfo(req *http.Request, tokenString string, mul
 			targetURL, err := statsTargetURL(urlString, innerTokenString)
 			if err != nil {
 				return nil, err
+			}
+			innerGrant, err := streamGrant(innerJwtToken)
+			if err != nil {
+				return nil, delegation.ErrDenied
+			}
+			if innerGrant != nil {
+				parsedURL, _ := url.Parse(targetURL)
+				if !innerGrant.AllowsPath(parsedURL.Path) || h.delegations.Check(context.Background(), innerTokenString, innerGrant) != nil {
+					return nil, delegation.ErrDenied
+				}
 			}
 			statsInfoStructs = append(statsInfoStructs, &statsInfo{hostKey: hostUUID, url: targetURL})
 		}
@@ -260,6 +313,11 @@ func getProjectOrService(token *jwt.Token) ([]map[string]string, error) {
 
 func (h *StatsHandler) extractHostUUID(token *jwt.Token) (string, bool) {
 	hostUUID, found := stringClaim(token, "hostUuid")
+	if !found {
+		if grant, err := streamGrant(token); err == nil && grant != nil {
+			hostUUID, found = grant.Payload["hostUuid"].(string)
+		}
+	}
 	if !found {
 		log.Info("Host identifier was not found in statistics token.")
 		return "", false

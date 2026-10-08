@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/delegation"
 	"github.com/PastureStack/websocket-proxy/internal/logsafe"
 )
 
@@ -21,10 +23,11 @@ const wsProtoBinary string = "binary"
 type FrontendHandler struct {
 	backend         backendProxy
 	parsedPublicKey interface{}
+	delegations     *delegation.Verifier
 }
 
 func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	_, hostKey, authErr := h.auth(req)
+	token, hostKey, authErr := h.auth(req)
 	if authErr != nil {
 		log.Infof("Frontend auth failed: %s", logsafe.Value(authErr))
 		http.Error(rw, "Failed authentication", 401)
@@ -46,6 +49,11 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer closeConnection(ws)
+	grant, _ := streamGrant(token)
+	if grant != nil {
+		cancel := h.delegations.Watch(req.Context(), token.Raw, grant, func() { closeConnection(ws) })
+		defer cancel()
+	}
 	ws.SetReadLimit(common.MaxWireMessageBytes)
 
 	msgKey, respChannel, err := h.backend.initializeClient(hostKey)
@@ -86,6 +94,7 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 					closeConnection(ws)
 				}
 			case common.Close:
+				closeForBackendOutcome(ws, message.Body)
 				closeConnection(ws)
 			}
 		}
@@ -128,6 +137,20 @@ func (h *FrontendHandler) auth(req *http.Request) (*jwt.Token, string, error) {
 	if !token.Valid {
 		return nil, "", fmt.Errorf("Token not valid. Token parameter: %v", redactSecretForLog(tokenParam))
 	}
+	grant, err := streamGrant(token)
+	if err != nil {
+		return nil, "", delegation.ErrDenied
+	}
+	if grant != nil {
+		if !grant.AllowsPath(req.URL.Path) || h.delegations.Check(context.Background(), token.Raw, grant) != nil {
+			return nil, "", delegation.ErrDenied
+		}
+		hostUUID, ok := grant.Payload["hostUuid"].(string)
+		if ok && h.backend.hasBackend(hostUUID) {
+			return token, hostUUID, nil
+		}
+		return nil, "", delegation.ErrDenied
+	}
 
 	hostUUID, found := stringClaim(token, "hostUuid")
 	if found && h.backend.hasBackend(hostUUID) {
@@ -135,6 +158,14 @@ func (h *FrontendHandler) auth(req *http.Request) (*jwt.Token, string, error) {
 	}
 
 	return nil, "", fmt.Errorf("invalid or unavailable backend host")
+}
+
+func streamGrant(token *jwt.Token) (*delegation.Grant, error) {
+	claims, ok := mapClaims(token)
+	if !ok {
+		return nil, delegation.ErrDenied
+	}
+	return delegation.Parse(map[string]interface{}(claims))
 }
 
 func closeConnection(ws *websocket.Conn) {
