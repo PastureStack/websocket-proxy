@@ -247,6 +247,12 @@ func (h *PersistentSessionHandler) createSession(rw http.ResponseWriter, req *ht
 	authRequest.URL = &authURL
 	token, hostKey, err := h.frontend.auth(authRequest)
 	if err != nil {
+		if errors.Is(err, errBackendAuditCapability) {
+			code := reportCapabilityError(h.frontend.failures, h.frontend.backend, err)
+			rw.Header().Set(streamErrorCodeHeader, code)
+			writeWorkspaceJSONError(rw, http.StatusServiceUnavailable, code, code)
+			return
+		}
 		writeWorkspaceJSONError(rw, http.StatusUnauthorized, "authentication_failed", "Workspace session authentication failed")
 		return
 	}
@@ -258,6 +264,10 @@ func (h *PersistentSessionHandler) createSession(rw http.ResponseWriter, req *ht
 	session, created, err := h.manager.createWithAuthorization(sessionID, input.Kind, secretHash, hostKey, targetURL, bind)
 	if err != nil {
 		switch err {
+		case errBackendAuditCapability:
+			code := reportBackendFailure(h.frontend.failures, h.frontend.backend, token.Raw, hostKey)
+			rw.Header().Set(streamErrorCodeHeader, code)
+			writeWorkspaceJSONError(rw, http.StatusServiceUnavailable, code, code)
 		case errWorkspaceSessionConflict:
 			writeWorkspaceJSONError(rw, http.StatusConflict, "session_conflict", "Console session identifier is already in use")
 		case errWorkspaceSessionLimit:
@@ -372,7 +382,7 @@ func (m *persistentSessionManager) createWithAuthorization(id, kind string, secr
 		return nil, false, errWorkspaceSessionLimit
 	}
 
-	msgKey, responseChannel, err := m.backend.initializeClient(hostKey)
+	msgKey, responseChannel, err := initializeForURL(m.backend, hostKey, targetURL)
 	if err != nil {
 		return nil, false, err
 	}

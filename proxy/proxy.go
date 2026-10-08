@@ -54,6 +54,7 @@ func (s *Starter) StartProxy() error {
 		backend:         bpm,
 		parsedPublicKey: s.Config.PublicKey,
 		delegations:     delegation.New("http://" + s.Config.PlatformAddr),
+		failures:        delegation.NewFailureReporter("http://" + s.Config.PlatformAddr),
 	}
 	frontendHandler := switcher.Wrap(frontendBaseHandler)
 	persistentSessionHandler := switcher.Wrap(NewPersistentSessionHandler(frontendBaseHandler, bpm))
@@ -62,6 +63,7 @@ func (s *Starter) StartProxy() error {
 		backend:         bpm,
 		parsedPublicKey: s.Config.PublicKey,
 		delegations:     frontendBaseHandler.delegations,
+		failures:        frontendBaseHandler.failures,
 	})
 
 	backendHandler := switcher.Wrap(&BackendHandler{

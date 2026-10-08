@@ -26,6 +26,7 @@ func (*scopedTestBackend) send(string, string, string) error      { return nil }
 func (b *scopedTestBackend) closeConnection(string, string) error { b.closed.Add(1); return nil }
 func (*scopedTestBackend) releaseConnection(string, string) error { return nil }
 func (*scopedTestBackend) hasBackend(host string) bool            { return host == "h1" }
+func (*scopedTestBackend) supportsKeyTraces(string) bool          { return true }
 
 func scopedProxyFixture(t *testing.T) (string, *delegation.Grant, *delegation.Verifier, *atomic.Bool) {
 	t.Helper()

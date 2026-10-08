@@ -8,6 +8,8 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 
 The source package version is `0.23.15`. Target-bound API Key tickets require exact target, operation, revision, expiry, and ticket digest matches from the trusted Engine. Handshake and periodic live checks fail closed. Persistent console secrets cannot extend an expired or revoked ticket; revocation also clears replay data. Legacy and full-without-expiry token authentication remains unchanged.
 
+Every verified API Key stream requires an authenticated Host API `0.38.5` connection declaring `key-audit-v1,key-delegation-v1`. Missing capabilities prevent forwarding any execution payload. The Proxy submits only the signed stream ticket and that connection's signed backend ticket to the Engine's fixed audit-only failure endpoint; it returns `BackendAuditCapabilityUnavailable` (503) only after durable acceptance, or `AuditUnavailable` (503) when evidence cannot be accepted. Ordinary non-Key streams do not gain this capability requirement.
+
 Certificate discovery is schema-driven with bounded responses, timeouts, same-origin URL checks, and bounded ZIP extraction. TLS listeners require TLS 1.2 or newer. Dependency provenance is recorded in `go.mod`, `go.sum`, `vendor/modules.txt`, and [`DEPENDENCIES.md`](DEPENDENCIES.md).
 
 ## Configuration

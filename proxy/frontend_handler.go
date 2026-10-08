@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -24,11 +25,16 @@ type FrontendHandler struct {
 	backend         backendProxy
 	parsedPublicKey interface{}
 	delegations     *delegation.Verifier
+	failures        *delegation.FailureReporter
 }
 
 func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	token, hostKey, authErr := h.auth(req)
 	if authErr != nil {
+		if errors.Is(authErr, errBackendAuditCapability) {
+			writeBackendAuditUnavailable(rw, reportCapabilityError(h.failures, h.backend, authErr))
+			return
+		}
 		log.Infof("Frontend auth failed: %s", logsafe.Value(authErr))
 		http.Error(rw, "Failed authentication", 401)
 		return
@@ -56,8 +62,12 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 	ws.SetReadLimit(common.MaxWireMessageBytes)
 
-	msgKey, respChannel, err := h.backend.initializeClient(hostKey)
+	requestURL := keyRequestURL(req, token)
+	msgKey, respChannel, err := initializeForURL(h.backend, hostKey, requestURL)
 	if err != nil {
+		if errors.Is(err, errBackendAuditCapability) {
+			closeForBackendOutcome(ws, reportBackendFailure(h.failures, h.backend, token.Raw, hostKey)+":503")
+		}
 		log.Errorf("Error during initialization: [%s]", logsafe.Value(err))
 		closeConnection(ws)
 		return
@@ -100,8 +110,10 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 	}()
 
-	requestURL := req.URL.String()
 	if err = h.backend.connect(hostKey, msgKey, requestURL); err != nil {
+		if errors.Is(err, errBackendAuditCapability) {
+			closeForBackendOutcome(ws, reportBackendFailure(h.failures, h.backend, token.Raw, hostKey)+":503")
+		}
 		return
 	}
 
@@ -147,6 +159,9 @@ func (h *FrontendHandler) auth(req *http.Request) (*jwt.Token, string, error) {
 		}
 		hostUUID, ok := grant.Payload["hostUuid"].(string)
 		if ok && h.backend.hasBackend(hostUUID) {
+			if err := requireKeyBackend(h.backend, token, hostUUID); err != nil {
+				return token, hostUUID, err
+			}
 			return token, hostUUID, nil
 		}
 		return nil, "", delegation.ErrDenied
@@ -154,6 +169,9 @@ func (h *FrontendHandler) auth(req *http.Request) (*jwt.Token, string, error) {
 
 	hostUUID, found := stringClaim(token, "hostUuid")
 	if found && h.backend.hasBackend(hostUUID) {
+		if err := requireKeyBackend(h.backend, token, hostUUID); err != nil {
+			return token, hostUUID, err
+		}
 		return token, hostUUID, nil
 	}
 
