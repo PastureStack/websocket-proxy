@@ -10,6 +10,8 @@ The source package version is `0.23.15`. Target-bound API Key tickets require ex
 
 Every verified API Key stream requires an authenticated Host API `0.38.5` connection declaring `key-audit-v1,key-delegation-v1`. Missing capabilities prevent forwarding any execution payload. The Proxy submits only the signed stream ticket and that connection's signed backend ticket to the Engine's fixed audit-only failure endpoint; it returns `BackendAuditCapabilityUnavailable` (503) only after durable acceptance, or `AuditUnavailable` (503) when evidence cannot be accepted. Ordinary non-Key streams do not gain this capability requirement.
 
+An expired, signed Key-traced ticket is rejected before creating a backend or persistent session. Its fixed denial receipt uses the ticket's verified identity and an authenticated host proof; signature-only parsing is never an authorization path. Each handshake attempt has a separate audit receipt. Tokens without verified Key attribution retain their existing authentication behavior and cannot claim someone else's audit history.
+
 Certificate discovery is schema-driven with bounded responses, timeouts, same-origin URL checks, and bounded ZIP extraction. TLS listeners require TLS 1.2 or newer. Dependency provenance is recorded in `go.mod`, `go.sum`, `vendor/modules.txt`, and [`DEPENDENCIES.md`](DEPENDENCIES.md).
 
 ## Configuration

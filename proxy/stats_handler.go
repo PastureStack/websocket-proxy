@@ -66,6 +66,10 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	tokenString, authToken, err := h.auth(req)
 	if err != nil {
+		if errors.Is(err, errDelegationExpired) {
+			writeExpiredDenial(rw, h.failures, h.backend, err)
+			return
+		}
 		if errors.Is(err, errDelegationRouteDenied) {
 			writeRouteDenial(rw, h.failures, h.backend, err)
 			return
@@ -205,6 +209,11 @@ func (h *StatsHandler) auth(req *http.Request) (string, *jwt.Token, error) {
 	tokenString := req.URL.Query().Get("token")
 	token, err := parseRequestToken(tokenString, h.parsedPublicKey)
 	if err != nil {
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			if auditErr := expiredDelegationAudit(tokenString, h.parsedPublicKey); auditErr != nil {
+				return "", nil, auditErr
+			}
+		}
 		return "", nil, fmt.Errorf("Error parsing stats token. Failing auth. Error: %v", err)
 	}
 
@@ -219,6 +228,9 @@ func (h *StatsHandler) auth(req *http.Request) (string, *jwt.Token, error) {
 		return "", nil, err
 	}
 	if grant != nil && h.delegations.Check(req.Context(), tokenString, grant) != nil {
+		if auditErr := expiredDelegationAudit(tokenString, h.parsedPublicKey); auditErr != nil {
+			return "", nil, auditErr
+		}
 		return "", nil, delegation.ErrDenied
 	}
 

@@ -247,6 +247,14 @@ func (h *PersistentSessionHandler) createSession(rw http.ResponseWriter, req *ht
 	authRequest.URL = &authURL
 	token, hostKey, err := h.frontend.auth(authRequest)
 	if err != nil {
+		if errors.Is(err, errDelegationExpired) {
+			status, code := reportExpiredDenial(h.frontend.failures, h.frontend.backend, err)
+			rw.Header().Set(streamErrorCodeHeader, code)
+			rw.Header().Set("X-Api-Error-Code", code)
+			rw.Header().Set("Cache-Control", "no-store")
+			writeWorkspaceJSONError(rw, status, code, code)
+			return
+		}
 		if errors.Is(err, errDelegationRouteDenied) {
 			status, code := reportRouteDenial(h.frontend.failures, h.frontend.backend, err)
 			rw.Header().Set(streamErrorCodeHeader, code)

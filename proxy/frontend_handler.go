@@ -31,6 +31,10 @@ type FrontendHandler struct {
 func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	token, hostKey, authErr := h.auth(req)
 	if authErr != nil {
+		if errors.Is(authErr, errDelegationExpired) {
+			writeExpiredDenial(rw, h.failures, h.backend, authErr)
+			return
+		}
 		if errors.Is(authErr, errDelegationRouteDenied) {
 			writeRouteDenial(rw, h.failures, h.backend, authErr)
 			return
@@ -144,6 +148,11 @@ func (h *FrontendHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 func (h *FrontendHandler) auth(req *http.Request) (*jwt.Token, string, error) {
 	token, tokenParam, err := parseToken(req, h.parsedPublicKey)
 	if err != nil {
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			if auditErr := expiredDelegationAudit(tokenParam, h.parsedPublicKey); auditErr != nil {
+				return nil, "", auditErr
+			}
+		}
 		if tokenParam == "" {
 			return nil, "", noAuthError{err: err.Error()}
 		}
@@ -162,6 +171,9 @@ func (h *FrontendHandler) auth(req *http.Request) (*jwt.Token, string, error) {
 			return nil, "", err
 		}
 		if h.delegations.Check(context.Background(), token.Raw, grant) != nil {
+			if auditErr := expiredDelegationAudit(token.Raw, h.parsedPublicKey); auditErr != nil {
+				return nil, "", auditErr
+			}
 			return nil, "", delegation.ErrDenied
 		}
 		hostUUID, ok := grant.Payload["hostUuid"].(string)

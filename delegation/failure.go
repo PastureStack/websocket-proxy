@@ -30,7 +30,7 @@ func NewFailureReporter(engine string) *FailureReporter {
 }
 
 func (reporter *FailureReporter) Report(token, backendToken string) bool {
-	return reporter.report(token, backendToken, "")
+	return reporter.report(token, backendToken, "", "")
 }
 
 // ReportRouteDenied has one fixed meaning. A caller cannot choose an outcome,
@@ -39,16 +39,24 @@ func (reporter *FailureReporter) ReportRouteDenied(token, backendToken, attemptI
 	if !regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`).MatchString(attemptID) {
 		return false
 	}
-	return reporter.report(token, backendToken, attemptID)
+	return reporter.report(token, backendToken, attemptID, "DelegationRouteDenied")
 }
 
-func (reporter *FailureReporter) report(token, backendToken, attemptID string) bool {
+// Engine independently requires a verified owned ticket that is truly expired.
+func (reporter *FailureReporter) ReportExpired(token, backendToken, attemptID string) bool {
+	if !regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`).MatchString(attemptID) {
+		return false
+	}
+	return reporter.report(token, backendToken, attemptID, "ApiKeyExpired")
+}
+
+func (reporter *FailureReporter) report(token, backendToken, attemptID, failureCode string) bool {
 	if reporter == nil || reporter.Endpoint == "" || reporter.Client == nil || token == "" || backendToken == "" || len(token) > MaxTokenBytes || len(backendToken) > MaxTokenBytes {
 		return false
 	}
 	proof := map[string]string{"token": token, "backendToken": backendToken}
 	if attemptID != "" {
-		proof["failureCode"] = "DelegationRouteDenied"
+		proof["failureCode"] = failureCode
 		proof["attemptId"] = attemptID
 	}
 	body, _ := json.Marshal(proof)

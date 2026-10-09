@@ -1,6 +1,7 @@
 package delegation
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -49,5 +50,28 @@ func TestRouteFailureReporterRequiresProxyAttemptUuidBeforeAnyNetworkCall(t *tes
 	}
 	if !reporter.ReportRouteDenied("grant", "proof", "00000000-0000-4000-8000-000000000000") || calls.Load() != 1 {
 		t.Fatal("valid fixed route evidence was not bounded to one request")
+	}
+}
+
+func TestExpiredFailureReporterRequiresFixedCodeAndServerAttemptBeforeAnyCall(t *testing.T) {
+	calls := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var body map[string]string
+		if json.NewDecoder(r.Body).Decode(&body) != nil || len(body) != 4 || body["failureCode"] != "ApiKeyExpired" ||
+			body["token"] != "grant" || body["backendToken"] != "proof" {
+			t.Error("expiry fixed dual proof changed")
+		}
+		_, _ = w.Write([]byte(`{"accepted":true}`))
+	}))
+	defer server.Close()
+	reporter := NewFailureReporter(server.URL)
+	for _, attempt := range []string{"", "caller", "00000000-0000-0000-0000-000000000000", "00000000-0000-4000-8000-000000000000\n"} {
+		if reporter.ReportExpired("grant", "proof", attempt) || calls.Load() != 0 {
+			t.Fatal("malformed expiry nonce reached Engine")
+		}
+	}
+	if !reporter.ReportExpired("grant", "proof", "00000000-0000-4000-8000-000000000000") || calls.Load() != 1 {
+		t.Fatal("fixed expiry evidence was not bounded to one call")
 	}
 }
