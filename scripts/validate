@@ -89,7 +89,7 @@ fi
 
 echo Running: reproducible builder and release-gate policy
 grep -Fx 'FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b' Dockerfile.dapper >/dev/null
-grep -Fx 'ARG GO_VERSION=1.27.0' Dockerfile.dapper >/dev/null
+grep -Fx 'ARG GO_VERSION=1.27.2' Dockerfile.dapper >/dev/null
 grep -Fx 'ARG DOCKER_VERSION=29.7.2' Dockerfile.dapper >/dev/null
 grep -Fx "UBUNTU_APT_SNAPSHOT='20260808T000000Z'" ubuntu-apt.lock >/dev/null
 

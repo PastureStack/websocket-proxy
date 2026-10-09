@@ -34,7 +34,7 @@ retention, and total sessions are bounded.
 
 ## Build and test
 
-From a Docker-capable Linux host:
+From a Docker-capable Linux host, the checksum-pinned builder uses Go `1.27.2`:
 
 ```sh
 make test
