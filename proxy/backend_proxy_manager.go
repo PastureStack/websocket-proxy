@@ -47,6 +47,9 @@ func (b *backendProxyManager) connect(backendKey, msgKey, url string) error {
 	if !ok {
 		return fmt.Errorf("No backend for key [%v]", backendKey)
 	}
+	if keyTraceURL(url) && !multiplexer.keyTraceCapable {
+		return errBackendAuditCapability
+	}
 	return multiplexer.connect(msgKey, url)
 }
 
@@ -88,12 +91,44 @@ func (b *backendProxyManager) hasBackend(backendKey string) bool {
 }
 
 func (b *backendProxyManager) addBackend(backendKey string, ws *websocket.Conn) {
+	b.addBackendWithKeyCapabilities(backendKey, ws, false, "")
+}
+
+func (b *backendProxyManager) supportsKeyTraces(backendKey string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	m := b.multiplexers[backendKey]
+	return m != nil && m.keyTraceCapable
+}
+
+func (b *backendProxyManager) initializeKeyClient(backendKey string) (string, <-chan common.Message, error) {
+	b.mu.RLock()
+	m := b.multiplexers[backendKey]
+	b.mu.RUnlock()
+	if m == nil || !m.keyTraceCapable {
+		return "", nil, errBackendAuditCapability
+	}
+	return m.initializeClient()
+}
+
+func (b *backendProxyManager) backendTicket(backendKey string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if m := b.multiplexers[backendKey]; m != nil {
+		return m.backendToken
+	}
+	return ""
+}
+
+func (b *backendProxyManager) addBackendWithKeyCapabilities(backendKey string, ws *websocket.Conn, keyTraceCapable bool, backendToken string) {
 	sessionID := common.NewRandomUUID()
 	logrus.Infof("Registering backend for host %s with session ID %s.", logsafe.Value(backendKey), logsafe.Value(sessionID))
 
 	msgs := make(chan string, 10)
 	clients := make(map[string]chan<- common.Message)
 	m := &multiplexer{
+		backendToken:      backendToken,
+		keyTraceCapable:   keyTraceCapable,
 		backendSessionID:  sessionID,
 		backendKey:        backendKey,
 		messagesToBackend: msgs,

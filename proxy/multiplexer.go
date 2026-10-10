@@ -13,6 +13,8 @@ import (
 )
 
 type multiplexer struct {
+	keyTraceCapable   bool
+	backendToken      string // Signature-verified connection proof; memory only.
 	backendSessionID  string
 	backendKey        string
 	messagesToBackend chan string
@@ -39,6 +41,12 @@ func (m *multiplexer) initializeClient() (string, <-chan common.Message, error) 
 }
 
 func (m *multiplexer) connect(msgKey, url string) error {
+	m.frontendMu.RLock()
+	_, exists := m.frontendChans[msgKey]
+	m.frontendMu.RUnlock()
+	if !exists {
+		return fmt.Errorf("client does not belong to the current backend connection")
+	}
 	return m.enqueue(common.FormatMessage(msgKey, common.Connect, url))
 }
 

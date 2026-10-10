@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/PastureStack/websocket-proxy/common"
+	"github.com/PastureStack/websocket-proxy/delegation"
 )
 
 const maxStatsTargets = 256
@@ -20,6 +23,8 @@ const maxStatsTargets = 256
 type StatsHandler struct {
 	backend         backendProxy
 	parsedPublicKey interface{}
+	delegations     *delegation.Verifier
+	failures        *delegation.FailureReporter
 }
 
 type statsInfo struct {
@@ -33,7 +38,7 @@ func (s *statsInfo) initializeClient(h *StatsHandler) error {
 	if s.hostKey == "" {
 		return fmt.Errorf("hostKey is empty")
 	}
-	msgKey, respChannel, err := h.backend.initializeClient(s.hostKey)
+	msgKey, respChannel, err := initializeForURL(h.backend, s.hostKey, s.url)
 	if err != nil {
 		return err
 	}
@@ -61,6 +66,14 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	tokenString, authToken, err := h.auth(req)
 	if err != nil {
+		if errors.Is(err, errDelegationExpired) {
+			writeExpiredDenial(rw, h.failures, h.backend, err)
+			return
+		}
+		if errors.Is(err, errDelegationRouteDenied) {
+			writeRouteDenial(rw, h.failures, h.backend, err)
+			return
+		}
 		http.Error(rw, "Failed authentication", 401)
 		return
 	}
@@ -89,8 +102,37 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	statsInfoStructs, err := h.parseStatsInfo(req, tokenString, multiHost)
 	if err != nil {
 		log.Error("Failed to read statistics targets")
+		if errors.Is(err, errDelegationRouteDenied) {
+			status, code := reportRouteDenial(h.failures, h.backend, err)
+			closeCode := websocket.ClosePolicyViolation
+			if status == http.StatusServiceUnavailable {
+				closeCode = websocket.CloseTryAgainLater
+			}
+			_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(closeCode, code), time.Now().Add(time.Second))
+			closeConnection(ws)
+			return
+		}
+		if errors.Is(err, errBackendAuditCapability) {
+			closeForBackendOutcome(ws, reportCapabilityError(h.failures, h.backend, err)+":503")
+			closeConnection(ws)
+			return
+		}
 		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Invalid statistics targets"), time.Now().Add(time.Second))
 		return
+	}
+	actualToken, err := parseRequestToken(tokenString, h.parsedPublicKey)
+	if err != nil {
+		closeConnection(ws)
+		return
+	}
+	grant, err := streamGrant(actualToken)
+	if err != nil {
+		closeConnection(ws)
+		return
+	}
+	if grant != nil {
+		cancel := h.delegations.Watch(req.Context(), tokenString, grant, func() { closeConnection(ws) })
+		defer cancel()
 	}
 
 	var mutex sync.Mutex
@@ -107,6 +149,10 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	for _, statsInfoStruct := range statsInfoStructs {
 		if err := statsInfoStruct.initializeClient(h); err != nil {
+			if errors.Is(err, errBackendAuditCapability) {
+				target, _ := url.Parse(statsInfoStruct.url)
+				closeForBackendOutcome(ws, reportBackendFailure(h.failures, h.backend, target.Query().Get("token"), statsInfoStruct.hostKey)+":503")
+			}
 			return
 		}
 	}
@@ -130,6 +176,7 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 					}
 					mutex.Unlock()
 				case common.Close:
+					closeForBackendOutcome(ws, message.Body)
 					countMutex.Lock()
 					doneCounter--
 					shouldClose := doneCounter == 0
@@ -143,6 +190,10 @@ func (h *StatsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}(statsInfoStruct)
 
 		if err = statsInfoStruct.connect(h); err != nil {
+			if errors.Is(err, errBackendAuditCapability) {
+				target, _ := url.Parse(statsInfoStruct.url)
+				closeForBackendOutcome(ws, reportBackendFailure(h.failures, h.backend, target.Query().Get("token"), statsInfoStruct.hostKey)+":503")
+			}
 			return
 		}
 	}
@@ -158,11 +209,29 @@ func (h *StatsHandler) auth(req *http.Request) (string, *jwt.Token, error) {
 	tokenString := req.URL.Query().Get("token")
 	token, err := parseRequestToken(tokenString, h.parsedPublicKey)
 	if err != nil {
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			if auditErr := expiredDelegationAudit(tokenString, h.parsedPublicKey); auditErr != nil {
+				return "", nil, auditErr
+			}
+		}
 		return "", nil, fmt.Errorf("Error parsing stats token. Failing auth. Error: %v", err)
 	}
 
 	if !token.Valid {
 		return "", nil, fmt.Errorf("Token not valid")
+	}
+	grant, err := streamGrant(token)
+	if err != nil {
+		return "", nil, delegation.ErrDenied
+	}
+	if err := checkStreamRoute(token, grant, req.URL.Path, h.parsedPublicKey); err != nil {
+		return "", nil, err
+	}
+	if grant != nil && h.delegations.Check(req.Context(), tokenString, grant) != nil {
+		if auditErr := expiredDelegationAudit(tokenString, h.parsedPublicKey); auditErr != nil {
+			return "", nil, auditErr
+		}
+		return "", nil, delegation.ErrDenied
 	}
 
 	return tokenString, token, nil
@@ -176,6 +245,28 @@ func (h *StatsHandler) parseStatsInfo(req *http.Request, tokenString string, mul
 
 	if !token.Valid {
 		return nil, fmt.Errorf("Token not valid")
+	}
+	grant, err := streamGrant(token)
+	if err != nil {
+		return nil, delegation.ErrDenied
+	}
+	if err := checkStreamRoute(token, grant, req.URL.Path, h.parsedPublicKey); err != nil {
+		return nil, err
+	}
+	if grant != nil && h.delegations.Check(req.Context(), tokenString, grant) != nil {
+		return nil, delegation.ErrDenied
+	}
+	originalToken := token
+	if grant != nil {
+		// Only the already signature/live-verified envelope is exposed to the
+		// existing statistics target parser; the wire JWT stays fail-closed.
+		copyToken := *token
+		claims := jwt.MapClaims{}
+		for key, value := range grant.Payload {
+			claims[key] = value
+		}
+		copyToken.Claims = claims
+		token = &copyToken
 	}
 
 	var statsInfoStructs []*statsInfo
@@ -203,6 +294,12 @@ func (h *StatsHandler) parseStatsInfo(req *http.Request, tokenString string, mul
 			if !found {
 				return nil, fmt.Errorf("Couldn't find host uuid on inner token")
 			}
+			if err := requireKeyBackend(h.backend, innerJwtToken, hostUUID); err != nil {
+				return nil, err
+			}
+			if err := requireKeyBackend(h.backend, originalToken, hostUUID); err != nil {
+				return nil, err
+			}
 			urlString, ok := data["url"]
 			if !ok {
 				return nil, fmt.Errorf("Could't find url field in inner token payload")
@@ -211,12 +308,28 @@ func (h *StatsHandler) parseStatsInfo(req *http.Request, tokenString string, mul
 			if err != nil {
 				return nil, err
 			}
+			innerGrant, err := streamGrant(innerJwtToken)
+			if err != nil {
+				return nil, delegation.ErrDenied
+			}
+			if innerGrant != nil {
+				parsedURL, _ := url.Parse(targetURL)
+				if err := checkStreamRoute(innerJwtToken, innerGrant, parsedURL.Path, h.parsedPublicKey); err != nil {
+					return nil, err
+				}
+				if h.delegations.Check(context.Background(), innerTokenString, innerGrant) != nil {
+					return nil, delegation.ErrDenied
+				}
+			}
 			statsInfoStructs = append(statsInfoStructs, &statsInfo{hostKey: hostUUID, url: targetURL})
 		}
 	} else {
 		hostUUID, found := h.extractHostUUID(token)
 		if !found {
 			return nil, fmt.Errorf("could not find host uuid")
+		}
+		if err := requireKeyBackend(h.backend, originalToken, hostUUID); err != nil {
+			return nil, err
 		}
 		statsInfoStructs = append(statsInfoStructs, &statsInfo{hostKey: hostUUID, url: req.URL.RequestURI()})
 	}
@@ -260,6 +373,11 @@ func getProjectOrService(token *jwt.Token) ([]map[string]string, error) {
 
 func (h *StatsHandler) extractHostUUID(token *jwt.Token) (string, bool) {
 	hostUUID, found := stringClaim(token, "hostUuid")
+	if !found {
+		if grant, err := streamGrant(token); err == nil && grant != nil {
+			hostUUID, found = grant.Payload["hostUuid"].(string)
+		}
+	}
 	if !found {
 		log.Info("Host identifier was not found in statistics token.")
 		return "", false

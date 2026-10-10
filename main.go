@@ -9,7 +9,7 @@ import (
 	"github.com/PastureStack/websocket-proxy/proxy"
 )
 
-var VERSION = "0.0.0"
+var VERSION = "0.23.15"
 
 func main() {
 	if versionRequested(os.Args[1:]) {

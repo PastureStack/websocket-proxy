@@ -12,6 +12,10 @@ fi
 if [ ! -x bin/websocket-proxy ]; then
     ./scripts/build
 fi
+test "$(bin/websocket-proxy --version)" = "pasturestack-websocket-proxy version ${VERSION#v}" || {
+    echo "websocket-proxy binary version does not match package version; rebuild source" >&2
+    exit 1
+}
 
 version="${VERSION#v}"
 arch="${ARCH:-amd64}"

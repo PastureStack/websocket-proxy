@@ -14,6 +14,15 @@ const (
 )
 
 func parseSignedJWT(tokenString string, parsedPublicKey interface{}) (*jwt.Token, error) {
+	return parseJWTSignature(tokenString, parsedPublicKey)
+}
+
+// Audit evidence may outlive a grant. This parser never authorizes a request.
+func parseAuditSignatureJWT(tokenString string, parsedPublicKey interface{}) (*jwt.Token, error) {
+	return parseJWTSignature(tokenString, parsedPublicKey, jwt.WithoutClaimsValidation())
+}
+
+func parseJWTSignature(tokenString string, parsedPublicKey interface{}, options ...jwt.ParserOption) (*jwt.Token, error) {
 	if tokenString == "" {
 		return nil, fmt.Errorf("no JWT provided")
 	}
@@ -24,13 +33,14 @@ func parseSignedJWT(tokenString string, parsedPublicKey interface{}) (*jwt.Token
 	if !ok || publicKey == nil || publicKey.N == nil || publicKey.N.BitLen() < minRSAKeyBits {
 		return nil, fmt.Errorf("JWT verification requires an RSA public key of at least %d bits", minRSAKeyBits)
 	}
+	options = append(options, jwt.WithValidMethods([]string{expectedJWTAlg}), jwt.WithJSONNumber())
 	return jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		method, ok := token.Method.(*jwt.SigningMethodRSA)
 		if !ok || method.Alg() != expectedJWTAlg {
 			return nil, fmt.Errorf("unexpected JWT signing method: %v", token.Header["alg"])
 		}
 		return publicKey, nil
-	}, jwt.WithValidMethods([]string{expectedJWTAlg}), jwt.WithJSONNumber())
+	}, options...)
 }
 
 func mapClaims(token *jwt.Token) (jwt.MapClaims, bool) {
