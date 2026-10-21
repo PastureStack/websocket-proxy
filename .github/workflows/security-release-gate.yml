@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      VERSION_OVERRIDE: v0.23.14
+      VERSION_OVERRIDE: v0.23.16
       SOURCE_DATE_EPOCH: "0"
       TRIVY_IMAGE: aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
       BUILDER_IMAGE: pasturestack-websocket-proxy-dapper:ubuntu26
@@ -22,7 +22,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Prepare evidence directory
-        run: mkdir -p evidence
+        run: |
+          mkdir -p evidence
+          test -z "$(git status --porcelain --untracked-files=no)"
+          git rev-parse HEAD >evidence/source-revision.txt
+          git rev-parse HEAD^{tree} >evidence/source-tree.txt
 
       - name: Build, test with the race detector, validate, and package
         id: build
@@ -30,7 +34,11 @@ jobs:
           set -o pipefail
           make ci 2>&1 | tee evidence/build-test.log
           cp bin/websocket-proxy evidence/websocket-proxy-linux-amd64
-          cp dist/artifacts/websocket-proxy-0.23.14-linux-amd64.tar.xz evidence/first-build.tar.xz
+          cp dist/artifacts/websocket-proxy-0.23.16-linux-amd64.tar.xz evidence/first-build.tar.xz
+          docker run --rm --entrypoint /bin/bash \
+            -v "$PWD/evidence:/evidence:ro" "$BUILDER_IMAGE" \
+            -lc 'go version -m /evidence/websocket-proxy-linux-amd64' >evidence/product.buildinfo
+          test "$(awk 'NR==1 {print $2}' evidence/product.buildinfo)" = go1.27.3
 
       - name: Verify a byte-identical second package
         id: reproduce
@@ -38,7 +46,7 @@ jobs:
           set -o pipefail
           rm -rf bin dist
           make package 2>&1 | tee evidence/reproducible-build.log
-          cp dist/artifacts/websocket-proxy-0.23.14-linux-amd64.tar.xz evidence/second-build.tar.xz
+          cp dist/artifacts/websocket-proxy-0.23.16-linux-amd64.tar.xz evidence/second-build.tar.xz
           cmp evidence/first-build.tar.xz evidence/second-build.tar.xz
           sha256sum evidence/first-build.tar.xz evidence/second-build.tar.xz \
             | tee evidence/package-sha256.txt

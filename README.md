@@ -6,7 +6,7 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 
 ## Capabilities
 
-The source package version is `0.23.15`. Target-bound API Key tickets require exact target, operation, revision, expiry, and ticket digest matches from the trusted Engine. Handshake and periodic live checks fail closed. Persistent console secrets cannot extend an expired or revoked ticket; revocation also clears replay data. Legacy and full-without-expiry token authentication remains unchanged.
+The source package version is `0.23.16`, rebuilt with Go 1.27.3 for the crypto/x509 fix CVE-2026-111943. Target-bound API Key tickets require exact target, operation, revision, expiry, and ticket digest matches from the trusted Engine. Handshake and periodic live checks fail closed. Persistent console secrets cannot extend an expired or revoked ticket; revocation also clears replay data. Legacy and full-without-expiry token authentication remains unchanged.
 
 Every verified API Key stream requires an authenticated Host API `0.38.5` connection declaring `key-audit-v1,key-delegation-v1`. Missing capabilities prevent forwarding any execution payload. The Proxy submits only the signed stream ticket and that connection's signed backend ticket to the Engine's fixed audit-only failure endpoint; it returns `BackendAuditCapabilityUnavailable` (503) only after durable acceptance, or `AuditUnavailable` (503) when evidence cannot be accepted. Ordinary non-Key streams do not gain this capability requirement.
 
@@ -34,7 +34,7 @@ retention, and total sessions are bounded.
 
 ## Build and test
 
-From a Docker-capable Linux host, the checksum-pinned builder uses Go `1.27.2`:
+From a Docker-capable Linux host, the checksum-pinned builder uses Go `1.27.3`:
 
 ```sh
 make test
@@ -42,9 +42,9 @@ make build
 make package
 ```
 
-The default producer version is `0.23.15`; `VERSION_OVERRIDE` accepts only numeric semantic versions. Packaging
+The default producer version is `0.23.16`; `VERSION_OVERRIDE` accepts only numeric semantic versions. Packaging
 rejects brand or maintenance suffixes and produces the deterministic,
-versioned `websocket-proxy-0.23.15-linux-amd64.tar.xz` asset. Install it with the matching official Engine and host-api package; scoped stream protection cannot be provided by replacing the proxy alone. Package publication and deployment are explicit operations.
+versioned `websocket-proxy-0.23.16-linux-amd64.tar.xz` asset. Install it with the matching official Engine and host-api package; scoped stream protection cannot be provided by replacing the proxy alone. Package publication and deployment are explicit operations.
 
 See [COMPATIBILITY.md](COMPATIBILITY.md), [SECURITY.md](SECURITY.md), and [ORIGIN.md](ORIGIN.md).
 
