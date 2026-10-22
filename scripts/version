@@ -12,5 +12,5 @@ if [ -n "${VERSION_OVERRIDE:-}" ]; then
 	fi
 	VERSION=${VERSION_OVERRIDE#v}
 else
-	VERSION="0.23.16"
+	VERSION="0.23.17"
 fi
