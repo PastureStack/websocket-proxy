@@ -6,9 +6,9 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 
 ## Capabilities
 
-The source package version is `0.23.16`, rebuilt with Go 1.27.3 for the crypto/x509 fix CVE-2026-111943. Target-bound API Key tickets require exact target, operation, revision, expiry, and ticket digest matches from the trusted Engine. Handshake and periodic live checks fail closed. Persistent console secrets cannot extend an expired or revoked ticket; revocation also clears replay data. Legacy and full-without-expiry token authentication remains unchanged.
+The source package version is `0.23.17`, built with Go 1.27.3 and supporting protocol-compatible Host API patch releases. Target-bound API Key tickets require exact target, operation, revision, expiry, and ticket digest matches from the trusted Engine. Handshake and periodic live checks fail closed. Persistent console secrets cannot extend an expired or revoked ticket; revocation also clears replay data. Legacy and full-without-expiry token authentication remains unchanged.
 
-Every verified API Key stream requires an authenticated Host API `0.38.5` connection declaring `key-audit-v1,key-delegation-v1`. Missing capabilities prevent forwarding any execution payload. The Proxy submits only the signed stream ticket and that connection's signed backend ticket to the Engine's fixed audit-only failure endpoint; it returns `BackendAuditCapabilityUnavailable` (503) only after durable acceptance, or `AuditUnavailable` (503) when evidence cannot be accepted. Ordinary non-Key streams do not gain this capability requirement.
+Every verified API Key stream requires an authenticated Host API connection declaring exactly `key-audit-v1,key-delegation-v1`, with a canonical numeric `0.38.x` version whose patch is at least `5`. Unknown major/minor families, duplicate or malformed declarations, prereleases, and leading-zero versions fail closed. Missing capabilities prevent forwarding any execution payload. The Proxy submits only the signed stream ticket and that connection's signed backend ticket to the Engine's fixed audit-only failure endpoint; it returns `BackendAuditCapabilityUnavailable` (503) only after durable acceptance, or `AuditUnavailable` (503) when evidence cannot be accepted. Ordinary non-Key streams do not gain this capability requirement.
 
 An expired, signed Key-traced ticket is rejected before creating a backend or persistent session. Its fixed denial receipt uses the ticket's verified identity and an authenticated host proof; signature-only parsing is never an authorization path. Each handshake attempt has a separate audit receipt. Tokens without verified Key attribution retain their existing authentication behavior and cannot claim someone else's audit history.
 
@@ -42,9 +42,9 @@ make build
 make package
 ```
 
-The default producer version is `0.23.16`; `VERSION_OVERRIDE` accepts only numeric semantic versions. Packaging
+The default producer version is `0.23.17`; `VERSION_OVERRIDE` accepts only numeric semantic versions. Packaging
 rejects brand or maintenance suffixes and produces the deterministic,
-versioned `websocket-proxy-0.23.16-linux-amd64.tar.xz` asset. Install it with the matching official Engine and host-api package; scoped stream protection cannot be provided by replacing the proxy alone. Package publication and deployment are explicit operations.
+versioned `websocket-proxy-0.23.17-linux-amd64.tar.xz` asset. Install only a published artifact with the matching official Engine and host-api package; scoped stream protection cannot be provided by replacing the proxy alone. Package publication and deployment are explicit operations.
 
 See [COMPATIBILITY.md](COMPATIBILITY.md), [SECURITY.md](SECURITY.md), and [ORIGIN.md](ORIGIN.md).
 

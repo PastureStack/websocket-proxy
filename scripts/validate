@@ -30,7 +30,7 @@ if [ "${#maintained_go_files[@]}" -gt 0 ]; then
 fi
 
 echo Running: version and dependency policy
-test "$(VERSION_OVERRIDE=v0.23.16 bash -c 'source scripts/version; printf %s "$VERSION"')" = "0.23.16"
+test "$(VERSION_OVERRIDE=v0.23.17 bash -c 'source scripts/version; printf %s "$VERSION"')" = "0.23.17"
 if VERSION_OVERRIDE=v0.23.12-maintenance.1 bash -c 'source scripts/version' >/dev/null 2>&1; then
     echo "non-numeric version suffix was accepted" >&2
     exit 1

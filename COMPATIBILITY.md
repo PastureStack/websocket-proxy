@@ -2,6 +2,14 @@
 
 The migration preserves existing `/v1`, `/v2-beta`, and `/v2` proxy paths, backend connection routes, subscription behavior, token validation inputs, generated client schemas, and proxy-protocol handling.
 
+Verified API Key streams require an authenticated backend Host ticket and the
+exact `key-audit-v1,key-delegation-v1` declaration. Compatible Host API patches
+use canonical `0.38.x` versions with patch >=5, including `0.38.5` and `0.38.6`;
+unknown major/minor families, prereleases, leading zeros, malformed values, and
+duplicate version or capability parameters remain rejected. This operational
+gate never replaces Engine authorization or live revision/expiry checks, and
+does not add a capability requirement to ordinary non-Key streams.
+
 Preferred settings use `platform-*`, `PLATFORM_*`, and
 `PROXY_PLATFORM_ADDRESS`. Historical `cattle-*`, `CATTLE_*`, and
 `PROXY_CATTLE_ADDRESS` aliases remain only as runtime configuration contracts.

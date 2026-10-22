@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/PastureStack/websocket-proxy/common"
@@ -134,8 +136,20 @@ type keyTraceInitializer interface {
 }
 
 func declaredKeyCapabilities(req *http.Request) bool {
-	query := req.URL.Query()
-	return len(query["hostApiVersion"]) == 1 && query.Get("hostApiVersion") == "0.38.5" && len(query["hostApiCapabilities"]) == 1 && query.Get("hostApiCapabilities") == "key-audit-v1,key-delegation-v1"
+	query, err := url.ParseQuery(req.URL.RawQuery)
+	return err == nil && len(query["hostApiVersion"]) == 1 && compatibleKeyBackendVersion(query.Get("hostApiVersion")) &&
+		len(query["hostApiCapabilities"]) == 1 && query.Get("hostApiCapabilities") == "key-audit-v1,key-delegation-v1"
+}
+
+// Patch releases in the established 0.38 family retain the explicit v1 wire
+// contract. This is not a claim that an unknown major/minor is compatible.
+func compatibleKeyBackendVersion(version string) bool {
+	patch, ok := strings.CutPrefix(version, "0.38.")
+	if !ok {
+		return false
+	}
+	number, err := strconv.ParseUint(patch, 10, 64)
+	return err == nil && number >= 5 && strconv.FormatUint(number, 10) == patch
 }
 
 // The caller must have verified the JWT before considering these claims.

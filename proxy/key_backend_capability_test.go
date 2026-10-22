@@ -118,6 +118,77 @@ func (m *capabilityManager) addBackendWithKeyCapabilities(_ string, ws *websocke
 func (*capabilityManager) removeBackend(string, string)         {}
 func (*capabilityManager) closeConnection(string, string) error { return nil }
 
+func TestDeclaredKeyCapabilitiesCompatiblePatch(t *testing.T) {
+	for _, version := range []string{"0.38.5", "0.38.6", "0.38.7", "0.38.10", "0.38.100"} {
+		query := url.Values{"hostApiVersion": {version}, "hostApiCapabilities": {"key-audit-v1,key-delegation-v1"}, "mode": {"host"}}
+		if !declaredKeyCapabilities(&http.Request{URL: &url.URL{RawQuery: query.Encode()}}) {
+			t.Errorf("compatible canonical patch %q rejected", version)
+		}
+	}
+	for _, version := range []string{"", "0.38.0", "0.38.4", "0.38", "0.38.5.0", "v0.38.5", "00.38.5", "0.038.5",
+		"0.38.05", "0.38.+5", "0.38.-5", "0.38.5-alpha", "0.38.5+build", " 0.38.5", "0.38.5 ", "0.38.5\n",
+		"0.38.18446744073709551616", "0.39.5", "1.38.5", "0.37.999"} {
+		query := url.Values{"hostApiVersion": {version}, "hostApiCapabilities": {"key-audit-v1,key-delegation-v1"}}
+		if declaredKeyCapabilities(&http.Request{URL: &url.URL{RawQuery: query.Encode()}}) {
+			t.Errorf("unsupported version %q accepted", version)
+		}
+	}
+	valid := "hostApiVersion=0.38.6&hostApiCapabilities=key-audit-v1,key-delegation-v1"
+	for _, query := range []string{
+		"hostApiCapabilities=key-audit-v1,key-delegation-v1", "hostApiVersion=0.38.6",
+		valid + "&hostApiVersion=0.38.6", valid + "&hostApiVersion=",
+		valid + "&hostApiCapabilities=key-audit-v1,key-delegation-v1", valid + "&hostApiCapabilities=",
+		"hostApiVersion=0.38.6&hostApiCapabilities=", "hostApiVersion=0.38.6&hostApiCapabilities=key-audit-v1",
+		"hostApiVersion=0.38.6&hostApiCapabilities=key-delegation-v1,key-audit-v1",
+		"hostApiVersion=0.38.6&hostApiCapabilities=key-audit-v1,key-delegation-v2",
+		valid + ";invalid", valid + "&hostApiVersion=%zz",
+	} {
+		if declaredKeyCapabilities(&http.Request{URL: &url.URL{RawQuery: query}}) {
+			t.Errorf("malformed or ambiguous declaration accepted: %q", query)
+		}
+	}
+}
+
+func TestCompatiblePatchBackendRegistrationKeepsKeyAndOrdinaryAuth(t *testing.T) {
+	scoped, _, verifier, _ := scopedProxyFixture(t)
+	full := testutils.CreateTokenWithPayload(map[string]interface{}{"hostUuid": "h1", "apiKeyAudit": map[string]interface{}{"version": 1}}, testutils.ParseTestPrivateKey())
+	ordinary := testutils.CreateTokenWithPayload(map[string]interface{}{"hostUuid": "h1"}, testutils.ParseTestPrivateKey())
+	for _, version := range []string{"0.38.5", "0.38.6"} {
+		t.Run(version, func(t *testing.T) {
+			manager := &capabilityManager{registered: make(chan bool, 1)}
+			handler := &BackendHandler{proxyManager: manager, parsedPublicKey: testutils.ParseTestPublicKey()}
+			server := httptest.NewServer(handler)
+			defer server.Close()
+			backendToken := testutils.CreateTokenWithPayload(map[string]interface{}{"reportedUuid": "h1"}, testutils.ParseTestPrivateKey())
+			query := url.Values{"hostApiVersion": {version}, "hostApiCapabilities": {"key-audit-v1,key-delegation-v1"}}
+			headers := http.Header{"Authorization": []string{"Bearer " + backendToken}}
+			ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/?"+query.Encode(), headers)
+			if err != nil {
+				t.Fatal("authenticated compatible backend registration failed")
+			}
+			defer ws.Close()
+			var capable bool
+			select {
+			case capable = <-manager.registered:
+			case <-time.After(time.Second):
+				t.Fatal("backend registration barrier timed out")
+			}
+			if !capable || manager.calls.Load() != 1 {
+				t.Fatal("authenticated compatible patch lost capability")
+			}
+			backend := &capabilityTestBackend{capable: capable}
+			frontend := &FrontendHandler{backend: backend, parsedPublicKey: testutils.ParseTestPublicKey(), delegations: verifier}
+			for _, raw := range []string{scoped, full, ordinary} {
+				request := httptest.NewRequest("GET", "http://proxy/v2-beta/exec/", nil)
+				request.Header.Set("Authorization", "Bearer "+raw)
+				if _, host, err := frontend.auth(request); err != nil || host != "h1" {
+					t.Fatal("registered capability did not preserve Key and ordinary authentication")
+				}
+			}
+		})
+	}
+}
+
 func TestBackendCapabilityCannotBeForgedWithoutAnAuthenticatedReportedHostTicket(t *testing.T) {
 	manager := &capabilityManager{registered: make(chan bool, 1)}
 	handler := &BackendHandler{proxyManager: manager, parsedPublicKey: testutils.ParseTestPublicKey()}
