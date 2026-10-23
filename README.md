@@ -55,3 +55,7 @@ The inherited project remains licensed under [Apache License 2.0](LICENSE). Copy
 ## October 2026 security maintenance
 
 Maintained Go builds select the patched Go 1.27.3 compiler without raising the existing Go language requirement. Ubuntu build/runtime stages apply the checksum-pinned `ca-certificates 20260816ubuntu0.26.04.1` security package after their frozen APT baseline; the final trust store and installed version are verified. Release artifacts must pass the repository's existing checks before publication.
+
+Future release gates retain and evaluate every product severity, including UNKNOWN.
+No newly reported or officially fixable product vulnerability is accepted; this
+policy-only update does not rebuild or replace the current immutable release.
