@@ -92,7 +92,7 @@ grep -Fx 'FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb
 grep -Fx 'ARG GO_VERSION=1.27.3' Dockerfile.dapper >/dev/null
 test "$(go env GOVERSION)" = go1.27.3
 test "$(go version bin/websocket-proxy | awk '{print $2}')" = go1.27.3
-grep -Fx 'ARG DOCKER_VERSION=29.7.2' Dockerfile.dapper >/dev/null
+grep -Fx 'ARG DOCKER_VERSION=29.9.2' Dockerfile.dapper >/dev/null
 grep -Fx "UBUNTU_APT_SNAPSHOT='20260808T000000Z'" ubuntu-apt.lock >/dev/null
 
 gate='.github/workflows/security-release-gate.yml'

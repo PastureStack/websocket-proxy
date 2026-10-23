@@ -1,7 +1,7 @@
 TARGETS := $(shell ls scripts)
 DAPPER_IMAGE ?= pasturestack-websocket-proxy-dapper:ubuntu26
 DAPPER_SOURCE ?= /go/src/github.com/PastureStack/websocket-proxy
-DOCKER_VERSION ?= 29.7.2
+DOCKER_VERSION ?= 29.9.2
 
 .dapper-image: Dockerfile.dapper
 	docker build \
