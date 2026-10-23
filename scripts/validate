@@ -30,7 +30,7 @@ if [ "${#maintained_go_files[@]}" -gt 0 ]; then
 fi
 
 echo Running: version and dependency policy
-test "$(VERSION_OVERRIDE=v0.23.17 bash -c 'source scripts/version; printf %s "$VERSION"')" = "0.23.17"
+test "$(VERSION_OVERRIDE=v0.23.18 bash -c 'source scripts/version; printf %s "$VERSION"')" = "0.23.18"
 if VERSION_OVERRIDE=v0.23.12-maintenance.1 bash -c 'source scripts/version' >/dev/null 2>&1; then
     echo "non-numeric version suffix was accepted" >&2
     exit 1
@@ -92,7 +92,7 @@ grep -Fx 'FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb
 grep -Fx 'ARG GO_VERSION=1.27.3' Dockerfile.dapper >/dev/null
 test "$(go env GOVERSION)" = go1.27.3
 test "$(go version bin/websocket-proxy | awk '{print $2}')" = go1.27.3
-grep -Fx 'ARG DOCKER_VERSION=29.7.2' Dockerfile.dapper >/dev/null
+grep -Fx 'ARG DOCKER_VERSION=29.9.2' Dockerfile.dapper >/dev/null
 grep -Fx "UBUNTU_APT_SNAPSHOT='20260808T000000Z'" ubuntu-apt.lock >/dev/null
 
 gate='.github/workflows/security-release-gate.yml'

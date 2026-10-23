@@ -1,14 +1,14 @@
 FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
 
 COPY ubuntu-apt.lock /licenses/ubuntu-apt.lock
-ADD --checksum=sha256:6077d27c6b6f8b23590cb01ff877ed8c804a67a5442cc32b5a33da10d2bd0e90 https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260601~26.04.1_all.deb /tmp/ca-certificates.deb
+ADD --checksum=sha256:5b6326f1932cfd7be57130561dc78192f09ed9f58bfbe6606ed0c50510c3b6cd https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260816ubuntu0.26.04.1_all.deb /tmp/ca-certificates.deb
 
 ARG DAPPER_HOST_ARCH=amd64
 ARG GO_VERSION=1.27.3
 ARG GO_SHA256_amd64=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
 ARG GO_SHA256_arm=d6f4e11dd7157030d7ac11c51c8f73201a2db932d593c3106b1da11cc32bfdf8
-ARG DOCKER_VERSION=29.7.2
-ARG DOCKER_SHA256_amd64=803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f
+ARG DOCKER_VERSION=29.9.2
+ARG DOCKER_SHA256_amd64=9ac225999fd5e863f7694c728ef23d480616b1e5639328fa309befd4243d69eb
 ARG DOCKER_SHA256_arm=e9d0ba1b419d0c7a83ecec33c4c1ca8ac1e4f36b41c7254d5a816f766f106a59
 
 ENV HOST_ARCH=${DAPPER_HOST_ARCH} \
@@ -25,6 +25,7 @@ ENV HOST_ARCH=${DAPPER_HOST_ARCH} \
     PATH=/go/bin:/usr/local/go/bin:${PATH} \
     SHELL=/bin/bash
 
+ADD --checksum=sha256:5b6326f1932cfd7be57130561dc78192f09ed9f58bfbe6606ed0c50510c3b6cd https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260816ubuntu0.26.04.1_all.deb /opt/pasturestack-ca-certificates.deb
 RUN set -eux; \
     . /licenses/ubuntu-apt.lock; \
     rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; \
@@ -42,7 +43,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         bash="${UBUNTU_APT_BASH_VERSION}" \
-        ca-certificates="${UBUNTU_APT_CA_CERTIFICATES_VERSION}" \
+        ca-certificates="${UBUNTU_APT_CA_CERTIFICATES_BOOTSTRAP_VERSION}" \
         curl="${UBUNTU_APT_CURL_VERSION}" \
         gcc="${UBUNTU_APT_GCC_VERSION}" \
         git="${UBUNTU_APT_GIT_VERSION}" \
@@ -50,6 +51,11 @@ RUN set -eux; \
         libc6-dev="${UBUNTU_APT_LIBC6_DEV_VERSION}" \
         tar="${UBUNTU_APT_TAR_VERSION}" \
         xz-utils="${UBUNTU_APT_XZ_UTILS_VERSION}"; \
+    dpkg -i /opt/pasturestack-ca-certificates.deb && \
+    update-ca-certificates --fresh && \
+    test "$(dpkg-query -W -f='${Version}' ca-certificates)" = '20260816ubuntu0.26.04.1' && \
+    test ! -e /usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt && \
+    rm -f /opt/pasturestack-ca-certificates.deb && \
     { \
         printf 'snapshot\t%s\n' "${UBUNTU_APT_SNAPSHOT}"; \
         dpkg-query -W -f='${binary:Package}\t${Version}\n' | LC_ALL=C sort; \
