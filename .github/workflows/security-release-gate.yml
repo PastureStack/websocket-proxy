@@ -116,7 +116,7 @@ jobs:
             -v "$PWD/evidence:/evidence" \
             "$TRIVY_IMAGE" rootfs \
             --scanners vuln \
-            --severity HIGH,CRITICAL \
+            --list-all-pkgs --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             --exit-code 1 \
             --format json \
             --output /evidence/product-vulnerabilities.json \
