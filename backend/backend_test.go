@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -91,7 +92,9 @@ func TestBackendGoesAway(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ws.ReadMessage() // Read initial echo message
+	if _, msg, err := ws.ReadMessage(); err != nil || string(msg) != "a message-response" {
+		t.Fatalf("initial echo failed: message %q, error %v", msg, err)
+	}
 	backendWs.Close()
 
 	if _, msg, err := ws.ReadMessage(); err == nil {
@@ -192,12 +195,25 @@ func (h *mockHandler) Handle(messageKey string, initialMessage string, incomingM
 }
 
 func getClientConnection(url string, t *testing.T) *websocket.Conn {
-	dialer := &websocket.Dialer{}
-	ws, _, err := dialer.Dial(url, http.Header{})
-	if err != nil {
-		t.Fatal(err)
+	t.Helper()
+	// Backend registration follows the HTTP 101 handshake, so the first
+	// frontend request may see a valid token with no registered backend yet.
+	dialer := &websocket.Dialer{HandshakeTimeout: time.Second}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		ws, response, err := dialer.Dial(url, http.Header{})
+		if err == nil {
+			return ws
+		}
+		if response != nil {
+			response.Body.Close()
+		}
+		if !errors.Is(err, websocket.ErrBadHandshake) || response == nil ||
+			response.StatusCode != http.StatusUnauthorized || !time.Now().Before(deadline) {
+			t.Fatalf("frontend failed to connect after backend handshake: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return ws
 }
 
 type echoHandler struct {
